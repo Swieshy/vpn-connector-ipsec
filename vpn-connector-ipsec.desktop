@@ -1,0 +1,12 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=VPN Connector IPsec
+Comment=Połączenie VPN (IPsec / IKEv1 aggressive + XAUTH)
+# ZMIEŃ ścieżkę na tę, gdzie faktycznie leży skrypt:
+Exec=/home/UZYTKOWNIK/vpn-connector-ipsec/vpn-connector-ipsec.py
+Icon=network-vpn
+Terminal=false
+Categories=Network;Security;GTK;
+Keywords=vpn;ipsec;libreswan;fortigate;
+StartupNotify=true
