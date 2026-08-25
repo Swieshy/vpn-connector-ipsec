@@ -1,3 +1,7 @@
-dane/
+dane/sekrety.enc
+dane/profile.json
+dane/ostatni-log.txt
+dane/stan.json
+dane/tray.pid
 __pycache__/
 *.pyc
