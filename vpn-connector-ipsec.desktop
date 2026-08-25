@@ -2,8 +2,8 @@
 [Desktop Entry]
 Type=Application
 Name=VPN Connector IPsec
-Comment=Połączenie VPN (IPsec / IKEv1 aggressive + XAUTH)
-# ZMIEŃ ścieżkę na tę, gdzie faktycznie leży skrypt:
+Comment=VPN connection (IPsec / IKEv1 aggressive + XAUTH)
+# CHANGE the path to wherever the script actually is:
 Exec=/home/UZYTKOWNIK/vpn-connector-ipsec/vpn-connector-ipsec.py
 Icon=network-vpn
 Terminal=false

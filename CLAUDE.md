@@ -1,439 +1,471 @@
-# CLAUDE.md — VPN Connector IPsec: instrukcja i notatki dla kolejnej sesji
+# CLAUDE.md — VPN Connector IPsec: guide and notes for the next session
 
-Ten plik jest jednocześnie dokumentacją użytkownika i notatkami technicznymi
-dla kolejnej sesji Claude Code — świadomie trzymane w jednym pliku. Czytaj to,
-zanim cokolwiek zmienisz. Użytkownik: Rafał, Fedora + KDE Plasma,
-mówi po polsku — odpowiadaj po polsku. Komentarze w kodzie, teksty w GUI i
-dokumentacja też po polsku.
+This file is both user documentation and technical notes for the next Claude
+Code session — deliberately kept in one file. Read this before changing
+anything. User: Rafał, Fedora + KDE Plasma. The project's language is now
+English — documentation, GUI text, and code comments should be in English
+(the user may still write to Claude in Polish in chat; that's fine, this is
+about the project artifacts, not the chat language).
 
-## Instalacja i uruchomienie
+## Installation and running
 
-Przenośne GUI (GTK4 + libadwaita) do libreswana w trybie IKEv1 aggressive +
-XAUTH — to, co robił wcześniejszy skrypt bashowy Rafała, tylko z profilami,
-wyborem szyfrów i podglądem logów.
+A portable GUI (GTK4 + libadwaita) for libreswan in IKEv1 aggressive + XAUTH
+mode — what Rafał's earlier bash script did, just with profiles, cipher
+selection, and log preview.
 
-**Bez instalatora.** Rozpakuj gdzie chcesz i uruchom:
+**No installer.** Unpack anywhere and run:
 
 ```bash
 chmod +x vpn-connector-ipsec.py
 ./vpn-connector-ipsec.py
 ```
 
-Wymagania (Fedora ma to zwykle z pudełka): `libreswan`, `polkit`, `openssl`,
-`python3-gobject`, `gtk4`, `libadwaita`. Gdyby czegoś brakowało:
+Requirements (Fedora usually has these out of the box): `libreswan`, `polkit`,
+`openssl`, `python3-gobject`, `gtk4`, `libadwaita`. If anything is missing:
 
 ```bash
 sudo dnf install libreswan polkit openssl python3-gobject gtk4 libadwaita
 ```
 
-Ikonka w trayu (opisana niżej) potrzebuje dodatkowo GTK 3 i AppIndicator —
-na czystej Fedorze zwykle trzeba doinstalować:
+The tray icon (described below) additionally needs GTK 3 and AppIndicator —
+on a clean Fedora you usually need to install:
 
 ```bash
 sudo dnf install libayatana-appindicator-gtk3
 ```
 
-Bez tego pakietu apka nadal działa normalnie — po prostu tray się nie pokaże
-(w terminalu pojawi się komunikat o brakującej bibliotece).
+Without this package the app still works normally — the tray just won't show
+up (a message about the missing library will appear in the terminal).
 
-## Skąd się to wzięło
+## Where this came from
 
-Rafał miał działającą, ręcznie dopieszczoną konfigurację libreswana do firmowego
-FortiGate: IKEv1 + aggressive mode + XAUTH + modecfg + split tunneling na
-`10.0.0.0/8`. Do tego skrypt bashowy `connect`/`disconnect`. Poprosił o GUI z
-profilami i możliwością zmiany szyfrów. Kolejne doprecyzowania w trakcie pracy:
+Rafał had a working, hand-tuned libreswan configuration for the company's
+FortiGate: IKEv1 + aggressive mode + XAUTH + modecfg + split tunneling on
+`10.0.0.0/8`, plus a bash `connect`/`disconnect` script. He asked for a GUI
+with profiles and the ability to change ciphers. Further refinements made
+along the way:
 
-1. „ma być lekkie, żeby nie zamulało” → GTK4 + libadwaita przez PyGObject
-   (na Fedorze już jest, jeden proces, brak demona w tle).
-2. „lepiej bez installera, niech to będzie aplikacja przenośna” → jeden plik
-   `.py`, brak `install.sh`, brak polityki polkit w `/usr/share`.
-3. „wszystkie dane zapisywane w folderze obok pliku, hasła zahaszowane możliwie”
-   → katalog `dane/` obok skryptu, hasła szyfrowane (nie hashowane — hash jest
-   jednokierunkowy, a libreswan potrzebuje plaintextu; zostało to Rafałowi
-   wyjaśnione).
-4. „sprzątanie może być — tych których nie ma na liście profili” → automatyczne
-   kasowanie osieroconych `bvpn-*.conf/.secrets` po udanym połączeniu + pozycja
-   w menu.
-5. „ikonka w trayu, żeby było widać czy VPN jest aktywny” → osobny proces
-   `--tray` (KDE Plasma, AppIndicator), startowany razem z GUI, zamykany
-   niezależnie z menu ikonki (patrz „Ikonka w trayu” niżej i pkt 7 w „Rzeczy,
-   które łatwo zepsuć”).
+1. "it should be lightweight, so it doesn't bog things down" → GTK4 +
+   libadwaita via PyGObject (already present on Fedora, single process, no
+   background daemon).
+2. "better without an installer, make it a portable application" → a single
+   `.py` file, no `install.sh`, no polkit policy in `/usr/share`.
+3. "all data saved in a folder next to the file, passwords hashed if
+   possible" → a `dane/` directory next to the script, passwords encrypted
+   (not hashed — hashing is one-way, and libreswan needs plaintext; this was
+   explained to Rafał).
+4. "cleanup is fine — for profiles no longer on the list" → automatic
+   deletion of orphaned `bvpn-*.conf/.secrets` after a successful connection,
+   plus a menu item.
+5. "a tray icon, so you can see whether the VPN is active" → a separate
+   `--tray` process (KDE Plasma, AppIndicator), launched together with the
+   GUI, closed independently from the icon's menu (see "Tray icon" below and
+   point 7 in "Things that are easy to break").
 
-**Nie proponuj instalatora, pakietu RPM ani usługi systemd bez wyraźnej prośby.**
-Przenośność jest świadomym wyborem.
+**Do not suggest an installer, an RPM package, or a systemd service without
+an explicit request.** Portability is a deliberate choice.
 
-## Gdzie lądują dane
+## Where the data lands
 
-Wszystko obok skryptu, w folderze `dane/`:
+Everything next to the script, in the `dane/` folder:
 
-| Plik | Co w środku |
+| File | What's inside |
 |---|---|
-| `dane/profile.json` | profile — **bez haseł**, chmod 600 |
-| `dane/sekrety.enc` | PSK i hasła XAUTH, AES-256-CBC, klucz z PBKDF2 (240 000 iteracji), chmod 600 |
-| `dane/stan.json` | stan połączenia (dla wskaźnika w oknie i w trayu) |
-| `dane/tray.pid` | PID wskaźnika w trayu — pilnuje jednej instancji naraz |
-| `dane/ostatni-log.txt` | log ostatniej akcji |
+| `dane/profile.json` | profiles — **no passwords**, chmod 600 |
+| `dane/sekrety.enc` | PSK and XAUTH passwords, AES-256-CBC, key from PBKDF2 (240,000 iterations), chmod 600 |
+| `dane/stan.json` | connection state (for the indicator in the window and in the tray) |
+| `dane/tray.pid` | PID of the tray indicator — guards a single instance at a time |
+| `dane/ostatni-log.txt` | log of the last action |
 
-Jeśli folder ze skryptem jest tylko do odczytu, aplikacja przechodzi na
-`~/.config/vpn-connector-ipsec/`. Bieżącą ścieżkę pokazuje menu → „Gdzie są dane?”.
+If the folder containing the script is read-only, the app falls back to
+`~/.config/vpn-connector-ipsec/`. The menu → "Where is the data?" shows the
+current path.
 
-Poza tym folderem powstają tylko pliki, których wymaga sam libreswan —
-patrz „Pliki libreswana” niżej.
+Outside this folder, only the files libreswan itself requires are created —
+see "libreswan files" below.
 
-## Ochrona haseł
+## Password protection
 
-Menu w sekcji „Hasła”, trzy tryby (`settings.crypt_mode` w `profile.json`):
+Menu, "Passwords" section, three modes (`settings.crypt_mode` in
+`profile.json`):
 
-- **Klucz powiązany z komputerem** (`machine`, domyślnie) — bez pytania o
-  cokolwiek. Klucz wyprowadzany z `/etc/machine-id` + nazwy użytkownika + UID.
-  Skopiowanie `dane/` na inny komputer albo na konto kolegi nic nie da; kto ma
-  roota na *tej* maszynie, odtworzy klucz. To zabezpieczenie przed przypadkowym
-  zerknięciem i przed wyciekiem pendrive'a, **nie przed adminem** — tak jest to
-  opisane tutaj i tak trzeba o tym mówić Rafałowi, nie sprzedawać jako pełnego
-  bezpieczeństwa.
-- **Hasło główne** (`master`) — pytane raz po starcie aplikacji, trzymane tylko
-  w pamięci procesu (`self.master`). Realna ochrona, kosztem jednego okienka
-  na sesję.
-- **Nie zapisuj haseł** (`none`) — plik `sekrety.enc` jest kasowany, aplikacja
-  pyta o PSK i hasło XAUTH przy każdym połączeniu.
+- **Key tied to this computer** (`machine`, default) — no prompt for
+  anything. The key is derived from `/etc/machine-id` + username + UID.
+  Copying `dane/` to another computer or to a colleague's account gets you
+  nothing; whoever has root on *this* machine can reconstruct the key. This
+  is protection against accidental glancing and against a lost USB stick,
+  **not against an admin** — that's how it's described here and that's how
+  it should be explained to Rafał, not sold as full security.
+- **Master password** (`master`) — asked once after the app starts, kept
+  only in the process's memory (`self.master`). Real protection, at the cost
+  of one dialog per session.
+- **Don't save passwords** (`none`) — the `sekrety.enc` file is deleted, the
+  app asks for the PSK and XAUTH password on every connection.
 
-Hasła nigdy nie trafiają do `profile.json` ani do logów.
+Passwords never end up in `profile.json` or in the logs.
 
-## Ikonka w trayu (KDE Plasma)
+## Tray icon (KDE Plasma)
 
-Przy pierwszym uruchomieniu GUI odpala też wskaźnik w trayu — osobny proces
-(`./vpn-connector-ipsec.py --tray`), niezależny od okna: zamknięcie okna aplikacji
-(krzyżykiem) **nie** zamyka trayu, bo o to chodzi — ikonka ma pokazywać stan
-połączenia, nawet gdy nie masz otwartego okna.
+On the GUI's first startup it also launches the tray indicator — a separate
+process (`./vpn-connector-ipsec.py --tray`), independent of the window:
+closing the app window (via the X button) does **not** close the tray, and
+that's the point — the icon is meant to show connection status even when you
+don't have the window open.
 
-Ikonka: zielone kółko gdy połączony, szary pusty okrąg gdy nie. To **własne
-SVG-ki, nie nazwy z motywu ikon systemu** — pierwsza wersja próbowała nazw
-z Adwaity (`network-vpn-symbolic` / `network-vpn-disabled-symbolic` /
-`network-vpn-disconnected-symbolic`), ale Breeze (KDE) tych „wyłączonych”
-wariantów nie ma, więc wyszukiwanie po nazwie nie trafiało i tray zawsze
-zostawał przy ostatnio poprawnie znalezionej ikonce — wygląda jak „ikonka się
-nie zmienia”, niezależnie od stanu połączenia. Stąd `_ensure_tray_icons()`
-zapisuje dwa małe SVG (wbudowane w kod jako `_TRAY_ICON_ON_SVG`/`_TRAY_ICON_OFF_SVG`)
-do `dane/icons/` przy starcie trayu, a `indicator.set_icon_theme_path(TRAY_ICON_DIR)`
-wskazuje tam AppIndicator — 100% niezależne od tego, jaki motyw ikon ma
-użytkownik. Jeśli będziesz zmieniać wygląd ikonek, edytuj te dwie stałe, nie
-próbuj wracać do nazw z motywu systemowego. Menu pod prawym klawiszem:
+The icon: a green circle when connected, a gray empty circle when not. These
+are **our own SVGs, not names from the system icon theme** — the first
+version tried Adwaita names (`network-vpn-symbolic` /
+`network-vpn-disabled-symbolic` / `network-vpn-disconnected-symbolic`), but
+Breeze (KDE) doesn't have those "disabled" variants, so looking them up by
+name didn't match, and the tray always kept the last icon it had
+successfully found — it looks like "the icon doesn't change," regardless of
+connection state. Hence `_ensure_tray_icons()` writes two small SVGs (built
+into the code as `_TRAY_ICON_ON_SVG`/`_TRAY_ICON_OFF_SVG`) to `dane/icons/`
+when the tray starts, and `indicator.set_icon_theme_path(TRAY_ICON_DIR)`
+points AppIndicator there — 100% independent of whatever icon theme the user
+has. If you change how the icons look, edit those two constants; don't try
+to go back to names from the system theme. Right-click menu:
 
-- **Pokaż** — otwiera (albo podnosi, jeśli już działa) okno aplikacji.
-- **Zamknij** — otwiera okno, rozłącza aktywny profil (jeśli jest połączony)
-  i dopiero po zakończeniu rozłączania zamyka i okno, i tray. To jedyny sposób
-  na wyłączenie ikonki — zamykanie samego okna jej nie dotyka.
+- **Show** — opens (or raises, if already running) the app window.
+- **Close** — opens the window, disconnects the active profile (if
+  connected), and only once disconnecting is finished closes both the window
+  and the tray. This is the only way to turn off the icon — closing just the
+  window doesn't touch it.
 
-Tray nigdy nie dotyka `pkexec`/`ipsec` bezpośrednio — do rozłączenia zawsze
-prosi działającą (albo dopiero startowaną) instancję GUI. Jedna instancja
-trayu naraz jest pilnowana plikiem `dane/tray.pid`. Techniczny opis protokołu
-tray ↔ GUI jest w pkt 7 sekcji „Rzeczy, które łatwo zepsuć”.
+The tray never touches `pkexec`/`ipsec` directly — to disconnect it always
+asks the running (or just-started) GUI instance. A single tray instance at a
+time is guarded by the `dane/tray.pid` file. A technical description of the
+tray ↔ GUI protocol is in point 7 of the "Things that are easy to break"
+section.
 
-Tray jest testowany tylko na **KDE Plasma** (natywny StatusNotifierItem/
-AppIndicator). Na GNOME Shell wymagałby rozszerzenia „AppIndicator and
-KStatusNotifierItem Support” — nie testowane, nie zakładaj, że działa bez niego.
+The tray is only tested on **KDE Plasma** (native StatusNotifierItem/
+AppIndicator). On GNOME Shell it would need the "AppIndicator and
+KStatusNotifierItem Support" extension — untested, don't assume it works
+without it.
 
-## Uprawnienia
+## Permissions
 
-GUI działa jako zwykły użytkownik. Kiedy trzeba roota, uruchamia **ten sam plik**
-ponownie: `pkexec python3 vpn-connector-ipsec.py --helper <komenda>`. Konfiguracja
-profilu idzie do niego JSON-em przez stdin, helper waliduje każde pole regexem,
-zanim dotknie `/etc/ipsec.d`, `ipsec`, `ip` czy `systemctl`. polkit domyślnie
-cache'uje autoryzację na kilka minut, więc nie pyta przy każdym kliknięciu.
-Szczegóły techniczne (dlaczego `pkexec python3 <plik>`, a nie `pkexec <plik>`)
-są w sekcji „Architektura” niżej.
+The GUI runs as a regular user. When root is needed, it launches **this same
+file** again: `pkexec python3 vpn-connector-ipsec.py --helper <command>`. The
+profile configuration goes to it as JSON over stdin, and the helper
+validates every field with a regex before it touches `/etc/ipsec.d`, `ipsec`,
+`ip`, or `systemctl`. polkit caches authorization for a few minutes by
+default, so it doesn't prompt on every click. Technical details (why
+`pkexec python3 <file>` and not `pkexec <file>`) are in the "Architecture"
+section below.
 
-## Pliki libreswana
+## libreswan files
 
-Każdy profil ma swoją parę, odtwarzaną przy każdym połączeniu:
+Each profile has its own pair, recreated on every connection:
 
-- `/etc/ipsec.d/bvpn-<profil>.conf` — nadpisywany przy „Połącz” zawartością
-  formularza, zostaje na dysku (chmod 644, nic wrażliwego).
-- `/etc/ipsec.d/bvpn-<profil>.secrets` — tworzony (chmod 600) tuż przed
-  `ipsec up`, zaraz po zestawieniu tunelu zerowany i kasowany.
+- `/etc/ipsec.d/bvpn-<profile>.conf` — overwritten with the form's contents
+  on "Connect", stays on disk (chmod 644, nothing sensitive).
+- `/etc/ipsec.d/bvpn-<profile>.secrets` — created (chmod 600) right before
+  `ipsec up`, zeroed out and deleted right after the tunnel is established.
 
-Prefiks `bvpn-` sprawia, że aplikacja nigdy nie dotknie ręcznego pliku `.conf`
-Rafała sprzed tego GUI — zostaje jako droga awaryjna.
+The `bvpn-` prefix means the app will never touch Rafał's manual `.conf` file
+that predates this GUI — it remains as a fallback.
 
-Pliki profili, których już nie ma na liście, są kasowane automatycznie po każdym
-udanym połączeniu, a na żądanie z menu → „Posprzątaj /etc/ipsec.d”.
+Profile files that are no longer on the list are automatically deleted after
+every successful connection, and on demand from the menu →
+"Clean up /etc/ipsec.d".
 
-## Pierwsze uruchomienie
+## First run
 
-1. Jeśli w `/etc/ipsec.conf` wisi aktywny
-   `include /etc/crypto-policies/back-ends/libreswan.config`, u góry okna pojawi
-   się pasek z przyciskiem **Napraw** — kliknięcie komentuje tę linię i zostawia
-   kopię `/etc/ipsec.conf.bvpn-backup`. To ten sam krok 1, który Rafał robił
-   ręcznie.
-2. Wypełnij profil (domyślny nazywa się `profil-1`):
-   brama (np. `203.0.113.1`), sieć `10.0.0.0/8`, użytkownik XAUTH,
-   `leftid`/`rightid` (np. `@moj-klucz`), PSK i hasło XAUTH.
-   Interfejs zostaw na `auto` (bierze z trasy domyślnej, więc działa i po wifi,
-   i po kablu), **Adres VPN** też `auto` (czyta to, co przydzieli modecfg;
-   gdyby odczyt zawiódł, wpisz adres przydzielony przez bramę na sztywno).
-3. **Połącz**.
+1. If `/etc/ipsec.conf` has an active
+   `include /etc/crypto-policies/back-ends/libreswan.config`, a bar with a
+   **Fix** button will appear at the top of the window — clicking it
+   comments out that line and leaves a copy at `/etc/ipsec.conf.bvpn-backup`.
+   This is the same step 1 that Rafał used to do manually.
+2. Fill in a profile (the default one is named `profile-1`): gateway (e.g.
+   `203.0.113.1`), network `10.0.0.0/8`, XAUTH user, `leftid`/`rightid` (e.g.
+   `@my-key`), PSK, and XAUTH password. Leave the interface at `auto` (it
+   takes it from the default route, so it works both over wifi and over
+   cable); leave **VPN address** at `auto` too (it reads what modecfg
+   assigns; if that read fails, enter the address assigned by the gateway
+   manually).
+3. **Connect**.
 
-## Co robi „Połącz”
+## What "Connect" does
 
-Sekwencja z oryginalnego skryptu Rafała, tylko doprowadzona do porządku:
+The sequence from Rafał's original script, just tidied up:
 
-1. zapis `bvpn-<profil>.conf` i `.secrets`,
-2. skasowanie tras i adresów z poprzedniego połączenia,
-3. `systemctl restart ipsec` + czekanie, aż pluto faktycznie wstanie,
+1. write `bvpn-<profile>.conf` and `.secrets`,
+2. delete routes and addresses left from the previous connection,
+3. `systemctl restart ipsec` + wait for pluto to actually come up,
 4. `ipsec rereadsecrets`, `ipsec add`, `ipsec up`,
-5. odczyt adresu przydzielonego przez modecfg,
+5. read the address assigned by modecfg,
 6. `ip addr add <vpn_ip>/32` + `ip route replace 10.0.0.0/8 dev <iface> src <vpn_ip>`,
-7. skasowanie pliku `.secrets` i osieroconych plików po usuniętych profilach.
+7. delete the `.secrets` file and any orphaned files from removed profiles.
 
-„Rozłącz” robi to samo w drugą stronę.
+"Disconnect" does the same thing in reverse.
 
-## Zmiana szyfrowania
+## Changing the encryption
 
-Sekcja „Szyfrowanie tunelu”: lista gotowych zestawów (`aes256-sha512;ecp256`
-Rafała jest pierwszy) albo ręczna edycja `ike=` i `phase2alg=`, plus przełączniki
-PFS, aggressive mode i NAT-T. Jak brama odrzuci propozycję, aplikacja rozpozna
-`no acceptable proposal` i napisze wprost, że chodzi o algorytmy.
+The "Tunnel encryption" section: a list of ready-made sets (Rafał's
+`aes256-sha512;ecp256` is first) or manual editing of `ike=` and
+`phase2alg=`, plus switches for PFS, aggressive mode, and NAT-T. If the
+gateway rejects the proposal, the app recognizes `no acceptable proposal`
+and states plainly that it's about the algorithms.
 
-## Skrót w menu aplikacji (opcjonalnie)
+## Application menu shortcut (optional)
 
-W paczce jest `vpn-connector-ipsec.desktop`. Popraw w nim ścieżkę `Exec=` na swoją i:
+The package includes `vpn-connector-ipsec.desktop`. Fix the `Exec=` path in
+it to match yours, then:
 
 ```bash
 mkdir -p ~/.local/share/applications
 cp vpn-connector-ipsec.desktop ~/.local/share/applications/
 ```
 
-Nic więcej nie jest instalowane w systemie.
+Nothing else gets installed on the system.
 
-## Diagnostyka
+## Diagnostics
 
-| Objaw | Co sprawdzić |
+| Symptom | What to check |
 |---|---|
-| `Usługa ipsec nie wstała` | `journalctl -u ipsec -n 50` — najczęściej crypto-policies |
-| `no acceptable proposal` | zestaw algorytmów w sekcji Szyfrowanie |
-| XAUTH odrzucone | login i hasło; `leftusername` musi pasować do wpisu XAUTH |
-| Tunel wstaje, brak ruchu | `ip route get 10.0.0.1` — czy trasa idzie właściwym interfejsem |
-| Nie odczytano adresu z modecfg | wpisz **Adres VPN** ręcznie |
-| Zapomniane hasło główne | skasuj `dane/sekrety.enc` i wpisz hasła od nowa |
-| Okno zawiesza się, CPU się grzeje | zbierz traceback: `PYTHONFAULTHANDLER=1 timeout -s ABRT 25 ./vpn-connector-ipsec.py` — patrz „Testowanie bez VPN-a” |
-| Tray się nie pokazuje | sprawdź czy jest `libayatana-appindicator-gtk3`; komunikat w terminalu powie, czego brakuje |
+| `The ipsec service did not come up` | `journalctl -u ipsec -n 50` — usually crypto-policies |
+| `no acceptable proposal` | the cipher set in the Encryption section |
+| XAUTH rejected | username and password; `leftusername` must match the XAUTH entry |
+| Tunnel comes up, no traffic | `ip route get 10.0.0.1` — is the route going through the right interface |
+| Address not read from modecfg | enter **VPN address** manually |
+| Forgotten master password | delete `dane/sekrety.enc` and re-enter the passwords |
+| Window hangs, CPU heats up | collect a traceback: `PYTHONFAULTHANDLER=1 timeout -s ABRT 25 ./vpn-connector-ipsec.py` — see "Testing without a VPN" |
+| Tray doesn't show up | check whether `libayatana-appindicator-gtk3` is installed; the terminal message will say what's missing |
 
-## Odinstalowanie
+## Uninstalling
 
-Skasuj folder. Ewentualnie posprzątaj po libreswanie:
+Delete the folder. Optionally clean up after libreswan:
 
 ```bash
 sudo rm -f /etc/ipsec.d/bvpn-*
-sudo mv /etc/ipsec.conf.bvpn-backup /etc/ipsec.conf   # jeśli chcesz cofnąć „Napraw”
+sudo mv /etc/ipsec.conf.bvpn-backup /etc/ipsec.conf   # if you want to undo "Fix"
 ```
 
-## Uwaga do oryginalnego skryptu
+## Note on the original script
 
-W `podsumowanievpn.md` skrypt ma połamane escapowanie po heredocu —
-`"\(VPN_IP/32"` zamiast `"$VPN_IP/32"` i `dev "INTERFACE" src "VPN_IP"` bez `$`.
-Aplikacja odtwarza zamierzoną logikę poprawnie i używa `ip route replace`
-zamiast `add`, więc nie wywala się, gdy trasa już istnieje.
+In `podsumowanievpn.md` the script has broken escaping after the heredoc —
+`"\(VPN_IP/32"` instead of `"$VPN_IP/32"`, and `dev "INTERFACE" src "VPN_IP"`
+without `$`. The app reproduces the intended logic correctly and uses
+`ip route replace` instead of `add`, so it doesn't fail when the route
+already exists.
 
-Wygenerowany `.conf` jest bajt w bajt zgodny z działającym plikiem Rafała
-(zweryfikowane diffem) — zmienia się tylko nazwa `conn` na `bvpn-<profil>`.
+The generated `.conf` matches Rafał's working file byte for byte (verified
+with a diff) — only the `conn` name changes, to `bvpn-<profile>`.
 
-## Architektura
+## Architecture
 
-Jeden plik `vpn-connector-ipsec.py`, trzy role:
+A single file, `vpn-connector-ipsec.py`, with three roles:
 
-- **GUI** (`gui_main()`) — zwykły użytkownik, GTK4/libadwaita. Nigdy nie ma roota.
-- **helper** (`helper_main()`, wywołanie `--helper <cmd>`) — root, uruchamiany
-  przez `pkexec python3 <ten plik> --helper <cmd>`.
-- **tray** (`tray_main()`, wywołanie `--tray`) — zwykły użytkownik, GTK **3**
-  (celowo inny niż GUI — patrz pkt 7 niżej). Ikonka w trayu KDE Plasma.
+- **GUI** (`gui_main()`) — regular user, GTK4/libadwaita. Never has root.
+- **helper** (`helper_main()`, invoked as `--helper <cmd>`) — root, launched
+  via `pkexec python3 <this file> --helper <cmd>`.
+- **tray** (`tray_main()`, invoked as `--tray`) — regular user, GTK **3**
+  (deliberately different from the GUI — see point 7 below). The KDE Plasma
+  tray icon.
 
-Dlaczego `pkexec python3 <plik>`, a nie `pkexec <plik>`: pkexec odmawia
-uruchomienia programu, który nie jest własnością roota i zapisywalny dla innych.
-Skrypt w katalogu domowym takim nie jest, ale `/usr/bin/python3` już tak —
-a pkexec sprawdza tylko wykonywalny plik, nie jego argumenty. Dzięki temu nie
-trzeba niczego instalować w `/usr`. Brak własnej akcji polkit oznacza użycie
-domyślnej `org.freedesktop.policykit.exec` (`auth_admin_keep` dla aktywnej
-sesji — hasło raz na kilka minut).
+Why `pkexec python3 <file>` and not `pkexec <file>`: pkexec refuses to run a
+program that isn't owned by root and writable by others. A script in the
+home directory isn't like that, but `/usr/bin/python3` already is — and
+pkexec only checks the executable, not its arguments. This means nothing
+needs to be installed under `/usr`. Having no dedicated polkit action means
+the default `org.freedesktop.policykit.exec` is used (`auth_admin_keep` for
+the active session — password once every few minutes).
 
-**Konsekwencja bezpieczeństwa, o której trzeba pamiętać:** kto może pisać do
-`vpn-connector-ipsec.py`, ten po autoryzacji pkexec wykona swój kod jako root.
-To ten sam poziom zaufania co własny skrypt uruchamiany przez sudo. Nie kładź
-tego pliku w katalogu zapisywalnym dla innych.
+**Security consequence to keep in mind:** whoever can write to
+`vpn-connector-ipsec.py` will, after pkexec authorization, run their code as
+root. This is the same level of trust as your own script run via sudo. Don't
+put this file in a directory writable by others.
 
-### Protokół GUI ↔ helper
+### GUI ↔ helper protocol
 
-- profil leci JSON-em na **stdin** helpera,
-- helper streamuje logi linia po linii na **stdout** (GUI pokazuje je na żywo),
-- ostatnia linia to `##RESULT## {json}` — wynik strukturalny,
-- kod wyjścia: 0 = OK, 126 = anulowana autoryzacja pkexec, 127 = brak pkexec.
+- the profile goes to the helper's **stdin** as JSON,
+- the helper streams logs line by line to **stdout** (the GUI shows them
+  live),
+- the last line is `##RESULT## {json}` — the structured result,
+- exit code: 0 = OK, 126 = pkexec authorization canceled, 127 = pkexec not found.
 
-Klasa `Helper` w GUI używa `Gio.SubprocessLauncher` + `read_line_async`, więc
-okno się nie blokuje.
+The `Helper` class in the GUI uses `Gio.SubprocessLauncher` +
+`read_line_async`, so the window doesn't block.
 
-### Komendy helpera
+### Helper commands
 
 `up`, `down`, `status`, `cleanup`, `check-policy`, `fix-policy`.
 
-## Rzeczy, które łatwo zepsuć
+## Things that are easy to break
 
-### 1. Wygenerowany `.conf` musi zostać zgodny z działającą konfiguracją
+### 1. The generated `.conf` must stay consistent with the working configuration
 
-`build_conf()` produkuje dokładnie te same linie co ręczny plik Rafała
-(zweryfikowane diffem — zero różnic, poza nazwą `conn bvpn-<profil>`).
-Jeśli coś tam zmieniasz, przepuść to przez ten test:
+`build_conf()` produces exactly the same lines as Rafał's manual file
+(verified with a diff — zero differences, aside from the `conn
+bvpn-<profile>` name). If you change anything there, run it through this
+test:
 
 ```python
-gen = [l for l in build_conf(clean(profil)).splitlines()
+gen = [l for l in build_conf(clean(profile)).splitlines()
        if l.strip() and not l.startswith(("#", "conn"))]
-# porównaj z blokiem z podsumowanievpn.md
+# compare against the block from podsumowanievpn.md
 ```
 
-Szczególnie: `leftupdown=/usr/bin/true` (bez tego libreswan sam grzebie w
-trasach i psuje split tunneling), `modecfgpull=yes`, `encapsulation=yes`.
+In particular: `leftupdown=/usr/bin/true` (without this, libreswan pokes at
+routes on its own and breaks split tunneling), `modecfgpull=yes`,
+`encapsulation=yes`.
 
-### 2. Adw.ComboRow: nie wołaj `set_selected()` wewnątrz `notify::selected`
+### 2. Adw.ComboRow: don't call `set_selected()` inside `notify::selected`
 
-To **zawiesza** aplikację na twardo (nie wyjątek — blokada w GtkSingleSelection;
-złapane faulthandlerem podczas testów). Stąd flaga `self._preset_busy` i
-wczesne wyjścia w `_sync_preset()` / `_on_preset()`. Jeśli dodajesz kolejne
-ComboRow z dwukierunkową synchronizacją, zastosuj ten sam wzorzec.
+This **hangs** the app hard (not an exception — a lock inside
+GtkSingleSelection; caught with the faulthandler during testing). Hence the
+`self._preset_busy` flag and the early returns in `_sync_preset()` /
+`_on_preset()`. If you add another ComboRow with two-way synchronization,
+apply the same pattern.
 
-### 3. Walidacja w helperze to jedyna bariera
+### 3. Validation in the helper is the only barrier
 
-Helper działa jako root i dostaje dane z GUI. Każde pole przechodzi przez regex
-(`NAME_RE`, `ID_RE`, `USER_RE`, `ALGO_RE`, `IFACE_RE`, `NUM_RE`) albo przez
-`ipaddress`. Wszystkie wywołania systemowe idą listą argumentów do
-`subprocess.run` — **nigdy `shell=True`**. Dodając nowe pole, dopisz walidację
-w `clean()`, nie ufaj GUI.
+The helper runs as root and receives data from the GUI. Every field goes
+through a regex (`NAME_RE`, `ID_RE`, `USER_RE`, `ALGO_RE`, `IFACE_RE`,
+`NUM_RE`) or through `ipaddress`. All system calls go as an argument list to
+`subprocess.run` — **never `shell=True`**. When adding a new field, add
+validation in `clean()`; don't trust the GUI.
 
-Przetestowane i odrzucane: `8.8.8.8; rm -rf /`, `` aes256`whoami` ``, `wlo1;ls`,
-`../../etc/passwd`, `user$(id)`, `@moj-klucz && reboot`.
+Tested and rejected: `8.8.8.8; rm -rf /`, `` aes256`whoami` ``, `wlo1;ls`,
+`../../etc/passwd`, `user$(id)`, `@my-key && reboot`.
 
-### 4. Szyfrowanie haseł
+### 4. Password encryption
 
-`openssl enc -aes-256-cbc -pbkdf2 -iter 240000`, hasło podawane przez
-`-pass fd:N` (`pass_fds` w subprocess) — nie przez argv ani env, żeby nie było
-widoczne w `ps`. Świadomie **bez** biblioteki `cryptography`: openssl jest na
-każdej Fedorze, a zależność zewnętrzna psułaby przenośność. Tryby opisane
-w sekcji „Ochrona haseł” wyżej.
+`openssl enc -aes-256-cbc -pbkdf2 -iter 240000`, the password passed via
+`-pass fd:N` (`pass_fds` in subprocess) — not via argv or env, so it isn't
+visible in `ps`. Deliberately **without** the `cryptography` library: openssl
+is present on every Fedora, and an external dependency would hurt
+portability. The modes are described in the "Password protection" section
+above.
 
-### 5. Adres z modecfg
+### 5. Address from modecfg
 
-`detect_vpn_ip()` parsuje `ipsec status` szukając `<ip>/32===` w liniach
-zawierających nazwę połączenia, z pollingiem 10 × 0,5 s. To najbardziej kruchy
-element całości — format wyjścia zależy od wersji libreswana. Jeśli Rafał zgłosi
-„tunel wstaje, ale nie odczytuje adresu”, poproś o `sudo ipsec status | grep
-bvpn-` i dopasuj regex. Awaryjnie jest pole „Adres VPN” do wpisania na sztywno
-(u Rafała to konkretny adres przydzielony przez jego bramę).
+`detect_vpn_ip()` parses `ipsec status`, looking for `<ip>/32===` in lines
+containing the connection name, polling 10 × 0.5 s. This is the most
+fragile part of the whole thing — the output format depends on the
+libreswan version. If Rafał reports "the tunnel comes up, but the address
+isn't read," ask for `sudo ipsec status | grep bvpn-` and adjust the regex.
+As a fallback there's the **VPN address** field for entering it manually (in
+Rafał's case, the specific address assigned by his gateway).
 
 ### 6. crypto-policies
 
-Fedora wstrzykuje `chacha20_poly1305` do IKEv1 przez
-`include /etc/crypto-policies/back-ends/libreswan.config` w `/etc/ipsec.conf`,
-co uniemożliwia start usługi. `policy_status()` to wykrywa (odczyt bez roota),
-`fix-policy` komentuje linię i robi backup `.bvpn-backup`. To był krok 1
-ręcznej instrukcji Rafała i najczęstsza przyczyna „nie działa”.
+Fedora injects `chacha20_poly1305` into IKEv1 via
+`include /etc/crypto-policies/back-ends/libreswan.config` in
+`/etc/ipsec.conf`, which prevents the service from starting. `policy_status()`
+detects this (reading without root), `fix-policy` comments out the line and
+makes a `.bvpn-backup` backup. This was step 1 of Rafał's manual instructions
+and the most common cause of "it doesn't work."
 
-### 7. Tray — dlaczego osobny proces, i pułapka z EOF w `Helper._got_line`
+### 7. Tray — why a separate process, and the EOF trap in `Helper._got_line`
 
-Ikonka w trayu (`tray_main()`, `--tray`) używa `AyatanaAppIndicator3`, a ta
-biblioteka wystawia menu jako `Gtk.Menu` z **GTK 3** — nie da się jej wołać
-z tego samego interpretera co GUI (GTK 4/libadwaita). Dlatego tray to osobny
-proces uruchamiany przez `_spawn_tray()` z `start_new_session=True`, żyjący
-niezależnie od okna GUI. Jedna instancja pilnowana plikiem `dane/tray.pid`
+The tray icon (`tray_main()`, `--tray`) uses `AyatanaAppIndicator3`, and that
+library exposes its menu as a `Gtk.Menu` from **GTK 3** — it can't be called
+from the same interpreter as the GUI (GTK 4/libadwaita). That's why the tray
+is a separate process, launched by `_spawn_tray()` with
+`start_new_session=True`, living independently of the GUI window. A single
+instance is guarded by the `dane/tray.pid` file
 (`_tray_acquire_lock`/`_tray_release_lock`).
 
-Komunikacja tray → GUI idzie przez **GAction eksportowany po D-Bus**, nie
-przez nowy kanał: `App` rejestruje akcję `"rozlacz-i-zamknij"`
-(`Gio.SimpleAction`), GApplication automatycznie wystawia ją pod
-`/org/example/vpnconnectoripsec` (kropki → slashe z `APP_ID`). Tray sprawdza
-`org.freedesktop.DBus.NameHasOwner` dla `APP_ID`: jeśli GUI już działa, woła
+Tray → GUI communication goes through a **GAction exported over D-Bus**, not
+a new channel: `App` registers the `"rozlacz-i-zamknij"` action
+(`Gio.SimpleAction`), and GApplication automatically exposes it under
+`/org/example/vpnconnectoripsec` (dots → slashes from `APP_ID`). The tray
+checks `org.freedesktop.DBus.NameHasOwner` for `APP_ID`: if the GUI is
+already running, it calls
 `Gio.DBusActionGroup.get(...).activate_action("rozlacz-i-zamknij", None)`;
-jeśli nie, startuje `vpn-connector-ipsec.py --auto-shutdown`, co samo wywoła
-`Window.shutdown_after_disconnect()` po pokazaniu okna. „Pokaż” z trayu to
-zwykłe odpalenie `vpn-connector-ipsec.py` bez argumentów — unikalność `APP_ID`
-w `Gio.Application` (domyślne flagi, bez `NON_UNIQUE`) sama aktywuje istniejące
-okno zamiast tworzyć drugie.
+if not, it starts `vpn-connector-ipsec.py --auto-shutdown`, which itself
+calls `Window.shutdown_after_disconnect()` after showing the window. "Show"
+from the tray is just launching `vpn-connector-ipsec.py` with no arguments —
+the uniqueness of `APP_ID` in `Gio.Application` (default flags, no
+`NON_UNIQUE`) activates the existing window on its own instead of creating a
+second one.
 
-**Pułapka, na którą już się natknięto i naprawiono** (zob. `Helper._got_line`,
-klasa używana przez GUI do czytania logów z helpera): koniec strumienia
-(`read_line_finish`) w GLib po C zwraca `NULL`, ale przez wadliwą adnotację
-introspekcji PyGObject bywa to puste `b""` zamiast `None`. Warunek
-`if data is None: return` tego nie łapie — `self._read()` woła się w kółko
-przez `g_idle_dispatch` bez blokowania, co w 100% zajmuje jeden wątek i
-zamraża okno (widoczne jako zawieszone GUI + rozgrzany CPU, mimo że sama
-operacja VPN fizycznie się kończy, bo helper to osobny proces). Znaleziono to
-przez `PYTHONFAULTHANDLER=1 timeout -s ABRT 25` — trafiony traceback pokazywał
-główny wątek w pętli `g_main_context_iteration → g_idle_dispatch → ... →
-_got_line`. Poprawka: `if not data: return` (łapie oba przypadki). Jeśli
-dodajesz kolejny podobny odczyt strumienia asynchronicznego, stosuj ten sam
-wzorzec — nigdy `is None` samo w sobie.
+**A trap that was already hit and fixed** (see `Helper._got_line`, the class
+the GUI uses to read logs from the helper): end of stream
+(`read_line_finish`) in GLib returns `NULL` in C, but due to a faulty
+PyGObject introspection annotation it can come through as an empty `b""`
+instead of `None`. The condition `if data is None: return` doesn't catch
+this — `self._read()` calls itself over and over via `g_idle_dispatch`
+without blocking, which pegs one thread at 100% and freezes the window
+(visible as a hung GUI + a hot CPU, even though the VPN operation itself
+physically finishes, since the helper is a separate process). This was found
+via `PYTHONFAULTHANDLER=1 timeout -s ABRT 25` — the captured traceback showed
+the main thread in the loop `g_main_context_iteration → g_idle_dispatch →
+... → _got_line`. Fix: `if not data: return` (catches both cases). If you add
+another similar asynchronous stream read, use the same pattern — never `is
+None` on its own.
 
-**Druga pułapka, też znaleziona i naprawiona: „Zamknij” czasem nie kończył
-trayu.** Pierwsza wersja wykrywała koniec sekwencji rozłącz-i-zamknij przez
-odpytywanie `NameHasOwner` na D-Busie co 2 sekundy (ten sam timer co odświeżanie
-ikonki) z prostym automatem faz 0→1→2. Problem: jeśli GUI kończyło się szybciej
-niż te 2 sekundy — a dokładnie tak jest, gdy profil akurat nie był połączony,
-bo `shutdown_after_disconnect()` wtedy woła `self.close()` praktycznie od razu
-— tray nigdy nie zdążył próbkować w momencie, gdy nazwa była jeszcze na
-magistrali. Faza 1 nigdy nie awansowała do fazy 2, więc warunek „zniknęła po
-tym jak się pojawiła” nigdy się nie potwierdzał i tray zostawał w trayu na
-zawsze (do czasu 120 s „bezpiecznika”, który tylko poddawał próbę, nie zamykał
-ikonki). Poprawka: zamiast odpytywania — zdarzeniowe `Gio.bus_watch_name()` na
-`APP_ID`, z licznikiem `seen_appeared` (bo `g_bus_watch_name` woła
-`vanished`-handler też jako stan startowy, gdy nazwa jeszcze nie ma właściciela
-— to trzeba zignorować, liczy się tylko zniknięcie *po* co najmniej jednym
-`appeared`). To eliminuje dziurę czasową całkowicie, niezależnie od tego, jak
-szybko GUI się zamyka. Jeśli dodajesz kolejną logikę „czekaj aż coś na D-Busie
-się skończy”, użyj tego wzorca, nie odpytywania na timerze.
+**A second trap, also found and fixed: "Close" sometimes didn't finish
+closing the tray.** The first version detected the end of the
+disconnect-and-close sequence by polling `NameHasOwner` on D-Bus every 2
+seconds (the same timer as the icon refresh) with a simple 0→1→2 phase state
+machine. The problem: if the GUI finished faster than those 2 seconds — which
+is exactly what happens when the profile wasn't connected at the time,
+because `shutdown_after_disconnect()` then calls `self.close()` almost
+immediately — the tray never managed to sample at a moment when the name was
+still on the bus. Phase 1 never advanced to phase 2, so the condition
+"disappeared after it appeared" never got confirmed, and the tray stayed
+around forever (until the 120 s "fuse" timeout, which only gave up on the
+attempt, without closing the icon). Fix: instead of polling — an
+event-driven `Gio.bus_watch_name()` on `APP_ID`, with a `seen_appeared`
+counter (because `g_bus_watch_name` also calls the `vanished` handler as an
+initial state, when the name doesn't have an owner yet — that has to be
+ignored; only a disappearance *after* at least one `appeared` counts). This
+eliminates the timing gap entirely, regardless of how fast the GUI closes.
+If you add similar "wait until something on D-Bus finishes" logic, use this
+pattern, not timer-based polling.
 
-## Testowanie bez VPN-a
+## Testing without a VPN
 
-W kodzie jest headless self-test — przeklikuje okno i sprawdza asercje:
+The code has a headless self-test — it clicks through the window and checks
+assertions:
 
 ```bash
 rm -rf dane && BVPN_SELFTEST=1 xvfb-run -a timeout 40 python3 -u vpn-connector-ipsec.py
-# oczekiwane: "SELFTEST OK — profile: [...], sekrety: [...]"
+# expected: "SELFTEST OK — profiles: [...], secrets: [...]"
 ```
 
-Sprawdza: dodawanie/duplikowanie/przełączanie profili, powrót sekretów po
-zmianie profilu, synchronizację presetów w obie strony, brak jawnego hasła
-w `sekrety.enc`, poprawność odszyfrowania. Tray jest w tym trybie wyłączony
-(`BVPN_SELFTEST` pomija `_spawn_tray()`), żeby test nie zostawiał osieroconego
-procesu.
+It checks: adding/duplicating/switching profiles, secrets coming back after
+switching profiles, two-way preset synchronization, no plaintext password in
+`sekrety.enc`, correct decryption. The tray is disabled in this mode
+(`BVPN_SELFTEST` skips `_spawn_tray()`), so the test doesn't leave an
+orphaned process behind.
 
-Przy zawieszeniu GUI: `PYTHONFAULTHANDLER=1` + `timeout -s ABRT 25` daje
-traceback z miejsca blokady. Tak znalazła się pułapka z ComboRow i pułapka
-z EOF w `Helper._got_line` (pkt 7 wyżej).
+If the GUI hangs: `PYTHONFAULTHANDLER=1` + `timeout -s ABRT 25` gives a
+traceback from where it's stuck. That's how the ComboRow trap and the EOF
+trap in `Helper._got_line` (point 7 above) were found.
 
-Helper da się testować bez libreswana — degraduje się z sensownymi komunikatami:
+The helper can be tested without libreswan — it degrades gracefully with
+sensible messages:
 
 ```bash
 echo '{"name":"t","right":"1.2.3.4","rightsubnet":"10.0.0.0/8","username":"u"}' \
   | sudo python3 vpn-connector-ipsec.py --helper up
 ```
 
-Uwaga: `pyflakes` przechodzi na czysto — utrzymaj ten stan.
+Note: `pyflakes` passes cleanly — keep it that way.
 
-## Czego jeszcze nie ma (kandydaci na następne kroki)
+## What's still missing (candidates for next steps)
 
-- Ikona w trayu jest tylko na KDE Plasma (patrz wyżej) — na GNOME Shell nie
-  testowane.
-- Autoreconnect po zerwaniu (DPD już jest skonfigurowane po stronie tunelu).
-- Import istniejącego `/etc/ipsec.d/*.conf` do profilu.
-- IKEv2 — `clean()` przyjmuje już `keyexchange`, ale GUI tego nie wystawia
-  i nie było testowane.
-- Podgląd `ipsec trafficstatus` w oknie (komenda `status` w helperze zwraca
-  już te dane, GUI ich nie używa).
-- Stan połączenia w `dane/stan.json` jest pisany przez roota, więc plik ma
-  właściciela root. Usunąć go może użytkownik (katalog jest jego), ale gdyby
-  przenosić dane na FAT/pendrive, `chmod` cicho zawiedzie — jest to obsłużone
-  `try/except`.
+- The tray icon is only on KDE Plasma (see above) — untested on GNOME Shell.
+- Auto-reconnect after a drop (DPD is already configured on the tunnel side).
+- Importing an existing `/etc/ipsec.d/*.conf` into a profile.
+- IKEv2 — `clean()` already accepts `keyexchange`, but the GUI doesn't expose
+  it and it hasn't been tested.
+- A preview of `ipsec trafficstatus` in the window (the helper's `status`
+  command already returns this data, the GUI doesn't use it).
+- The connection state in `dane/stan.json` is written by root, so the file
+  is owned by root. The user can delete it (the directory is theirs), but if
+  the data were moved to FAT/a USB stick, `chmod` would silently fail — this
+  is handled with `try/except`.
 
-## Styl pracy z tym użytkownikiem
+## Working style with this user
 
-Rafał dorzuca wymagania w trakcie — czyta odpowiedzi na bieżąco i dopytuje
-o szczegóły techniczne („gdzie to zapisujesz?”, „nowy profil to nowe pliki?”).
-Odpowiadaj konkretnie i krótko, bez marketingu. Docenia, gdy wskażesz błąd
-w jego materiale — np. połamane escapowanie `"\(VPN_IP/32"` i `dev "INTERFACE"
-src "VPN_IP"` (brak `$`) w `podsumowanievpn.md`, wynikające z heredoca.
+Rafał adds requirements as he goes — he reads responses as they come and
+asks follow-up technical questions ("where do you save that?", "does a new
+profile mean new files?"). Answer concretely and briefly, no marketing. He
+appreciates it when you point out an error in his material — e.g. the broken
+escaping `"\(VPN_IP/32"` and `dev "INTERFACE" src "VPN_IP"` (missing `$`) in
+`podsumowanievpn.md`, resulting from the heredoc.

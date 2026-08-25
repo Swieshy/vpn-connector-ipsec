@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VPN Connector IPsec — przenośne GUI do libreswana (IKEv1 aggressive + XAUTH).
+VPN Connector IPsec — a portable GUI for libreswan (IKEv1 aggressive + XAUTH).
 
-Bez instalacji. Uruchom jako zwykły użytkownik:
+No installation needed. Run as a regular user:
 
     ./vpn-connector-ipsec.py
 
-Wszystko, co wymaga roota (zapis /etc/ipsec.d, ipsec, ip, systemctl), robi ten
-sam plik uruchomiony ponownie przez pkexec w trybie --helper. GUI nigdy nie
-działa z uprawnieniami roota.
+Everything that needs root (writing to /etc/ipsec.d, ipsec, ip, systemctl) is
+done by this same file, re-launched via pkexec in --helper mode. The GUI never
+runs with root privileges.
 
-Wszystkie dane lądują w folderze "dane/" obok tego skryptu:
-    dane/profile.json      — profile bez haseł
-    dane/sekrety.enc       — hasła, zaszyfrowane AES-256 (openssl, PBKDF2)
-    dane/stan.json         — stan połączenia
-    dane/ostatni-log.txt   — log ostatniej sesji
-    dane/tray.pid          — PID wskaźnika w trayu (KDE Plasma), jedna instancja
+All data lands in the "dane/" folder next to this script:
+    dane/profile.json      — profiles without passwords
+    dane/sekrety.enc       — passwords, encrypted with AES-256 (openssl, PBKDF2)
+    dane/stan.json         — connection state
+    dane/ostatni-log.txt   — log of the last session
+    dane/tray.pid          — PID of the tray indicator (KDE Plasma), single instance
 
-GUI przy starcie odpala też wskaźnik w trayu (ten sam plik, tryb --tray) —
-żyje niezależnie od okna, dopóki nie wybierzesz w nim "Zamknij".
+On startup the GUI also launches the tray indicator (the same file, --tray
+mode) — it lives independently of the window until you pick "Close" in it.
 """
 
 import base64
@@ -49,32 +49,32 @@ ALGO_RE = re.compile(r"^[A-Za-z0-9;,_+.-]{1,200}$")
 IFACE_RE = re.compile(r"^[A-Za-z0-9._@:-]{1,32}$")
 NUM_RE = re.compile(r"^[0-9]{1,9}$")
 
-# (etykieta, ike, phase2alg)
+# (label, ike, phase2alg)
 PRESETS = [
-    ("AES-256 / SHA-512 / ECP-256  (Twoja działająca konfiguracja)",
+    ("AES-256 / SHA-512 / ECP-256  (your working configuration)",
      "aes256-sha512;ecp256", "aes256-sha512"),
     ("AES-256 / SHA-256 / MODP-2048", "aes256-sha256;modp2048", "aes256-sha256"),
     ("AES-256 / SHA-256 / ECP-256", "aes256-sha256;ecp256", "aes256-sha256"),
     ("AES-128 / SHA-256 / MODP-2048", "aes128-sha256;modp2048", "aes128-sha256"),
-    ("AES-256 / SHA-1 / MODP-1024  (stare FortiGate)", "aes256-sha1;modp1024", "aes256-sha1"),
-    ("AES-128 / SHA-1 / MODP-1024  (stare FortiGate)", "aes128-sha1;modp1024", "aes128-sha1"),
-    ("3DES / SHA-1 / MODP-1024  (ostateczność)", "3des-sha1;modp1024", "3des-sha1"),
+    ("AES-256 / SHA-1 / MODP-1024  (old FortiGate)", "aes256-sha1;modp1024", "aes256-sha1"),
+    ("AES-128 / SHA-1 / MODP-1024  (old FortiGate)", "aes128-sha1;modp1024", "aes128-sha1"),
+    ("3DES / SHA-1 / MODP-1024  (last resort)", "3des-sha1;modp1024", "3des-sha1"),
 ]
-CUSTOM_LABEL = "Własne (edytuj pola poniżej)"
+CUSTOM_LABEL = "Custom (edit the fields below)"
 
 CRYPT_MODES = ["machine", "master", "none"]
 CRYPT_LABELS = [
-    "Klucz powiązany z komputerem (bez pytania o hasło)",
-    "Hasło główne (pytane raz po starcie aplikacji)",
-    "Nie zapisuj haseł w ogóle",
+    "Key tied to this computer (no password prompt)",
+    "Master password (asked once after the app starts)",
+    "Don't save passwords at all",
 ]
 
 DEFAULT_PROFILE = {
-    "name": "nowy-profil",
+    "name": "new-profile",
     "right": "",
     "rightsubnet": "10.0.0.0/8",
-    "leftid": "@moj-klucz",
-    "rightid": "@moj-klucz",
+    "leftid": "@my-key",
+    "rightid": "@my-key",
     "username": "",
     "iface": "auto",
     "vpn_ip": "auto",
@@ -97,15 +97,15 @@ class Fatal(Exception):
 
 
 # ==========================================================================
-#  ŚCIEŻKI — wszystko obok skryptu
+#  PATHS — everything next to the script
 # ==========================================================================
 
 def data_dir():
-    """Folder 'dane' obok skryptu. Gdy nie da się tam pisać — ~/.config."""
+    """The 'dane' folder next to the script. If it's not writable — ~/.config."""
     candidate = os.path.join(APP_DIR, "dane")
     try:
         os.makedirs(candidate, exist_ok=True)
-        probe = os.path.join(candidate, ".zapis-test")
+        probe = os.path.join(candidate, ".write-test")
         with open(probe, "w") as fh:
             fh.write("")
         os.unlink(probe)
@@ -128,10 +128,10 @@ LOG_FILE = os.path.join(DATA_DIR, "ostatni-log.txt")
 TRAY_PID_FILE = os.path.join(DATA_DIR, "tray.pid")
 TRAY_ICON_DIR = os.path.join(DATA_DIR, "icons")
 
-# Własne ikonki trayu, niezależne od motywu ikon (Breeze na KDE nie ma
-# nazw w stylu "network-vpn-disabled-symbolic" z Adwaity — szukanie ich po
-# nazwie w motywie użytkownika nie trafiało, więc tray zostawał przy ostatnio
-# poprawnie znalezionej ikonce niezależnie od stanu połączenia).
+# Our own tray icons, independent of the icon theme (Breeze on KDE doesn't
+# have names like "network-vpn-disabled-symbolic" from Adwaita — looking them
+# up by name in the user's theme didn't match, so the tray kept the last
+# icon it had successfully found, regardless of the connection state).
 _TRAY_ICON_ON_SVG = (
     '<?xml version="1.0" encoding="UTF-8"?>\n'
     '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">\n'
@@ -149,7 +149,7 @@ TRAY_ICON_OFF = "vpn-connector-ipsec-off"
 
 
 def _ensure_tray_icons():
-    """Zapisuje własne SVG-ki trayu do dane/icons/, jeśli jeszcze nie ma."""
+    """Writes our own tray SVGs to dane/icons/, if not already there."""
     try:
         os.makedirs(TRAY_ICON_DIR, exist_ok=True)
         for name, svg in ((TRAY_ICON_ON, _TRAY_ICON_ON_SVG), (TRAY_ICON_OFF, _TRAY_ICON_OFF_SVG)):
@@ -170,8 +170,8 @@ def read_state():
 
 
 def _tray_acquire_lock():
-    """Jedna instancja trayu naraz: plik z PID w dane/. Jeśli proces z tego
-    PID-u wciąż żyje, ktoś inny już trzyma ikonkę."""
+    """Only one tray instance at a time: a PID file in dane/. If a process
+    with that PID is still alive, someone else already holds the icon."""
     try:
         with open(TRAY_PID_FILE) as fh:
             old_pid = int(fh.read().strip())
@@ -197,9 +197,9 @@ def _tray_release_lock():
 
 
 def _spawn_tray():
-    """Odpala wskaźnik w trayu jako proces odklejony od GUI (start_new_session) —
-    zamknięcie okna aplikacji nie ma go zabijać. tray_main() sam pilnuje, żeby nie
-    powstały dwie ikonki naraz."""
+    """Launches the tray indicator as a process detached from the GUI
+    (start_new_session) — closing the app window must not kill it. tray_main()
+    itself makes sure two icons never appear at once."""
     try:
         subprocess.Popen([sys.executable, SELF, "--tray"],
                           start_new_session=True,
@@ -211,9 +211,9 @@ def _spawn_tray():
 
 
 def policy_status():
-    """(problem, opis) — problem=True gdy aktywny include crypto-policies."""
+    """(problem, description) — problem=True when the crypto-policies include is active."""
     if not os.path.exists(IPSEC_CONF):
-        return False, "Brak %s" % IPSEC_CONF
+        return False, "%s missing" % IPSEC_CONF
     try:
         with open(IPSEC_CONF) as fh:
             for raw in fh:
@@ -223,12 +223,12 @@ def policy_status():
                 if line.startswith("include") and "libreswan.config" in line:
                     return True, line
     except OSError as exc:
-        return False, "Nie można odczytać %s (%s)" % (IPSEC_CONF, exc)
-    return False, "include crypto-policies jest wyłączony"
+        return False, "Cannot read %s (%s)" % (IPSEC_CONF, exc)
+    return False, "crypto-policies include is disabled"
 
 
 # ==========================================================================
-#  SZYFROWANIE HASEŁ  (openssl AES-256-CBC + PBKDF2, bez zewnętrznych bibliotek)
+#  PASSWORD ENCRYPTION  (openssl AES-256-CBC + PBKDF2, no external libraries)
 # ==========================================================================
 
 PBKDF2_ITER = 240000
@@ -239,11 +239,11 @@ def openssl_available():
 
 
 def machine_passphrase():
-    """Klucz związany z tym komputerem i użytkownikiem.
+    """A key tied to this computer and user.
 
-    To obfuskacja, nie forteca: kto ma roota na tej maszynie, odtworzy go.
-    Chroni przed odczytaniem haseł po skopiowaniu folderu na inny komputer
-    i przed przypadkowym zerknięciem do pliku.
+    This is obfuscation, not a fortress: anyone with root on this machine can
+    reconstruct it. It protects against reading passwords after copying the
+    folder to another computer, and against accidentally glancing at the file.
     """
     parts = ["vpn-connector-ipsec/v1"]
     for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
@@ -276,7 +276,7 @@ def _openssl(args, data, passphrase):
         os.close(r_fd)
     if proc.returncode != 0:
         raise Fatal((proc.stderr or b"").decode("utf-8", "replace").strip()
-                    or "openssl zwrócił błąd")
+                    or "openssl returned an error")
     return proc.stdout
 
 
@@ -295,13 +295,13 @@ def decrypt_blob(b64, passphrase):
 
 
 def load_secrets(passphrase):
-    """{nazwa_profilu: {'psk':…, 'xauth':…}}"""
+    """{profile_name: {'psk':…, 'xauth':…}}"""
     if not os.path.exists(SECRETS_FILE):
         return {}
     with open(SECRETS_FILE) as fh:
         payload = json.load(fh)
     if payload.get("format") != "openssl-aes256-pbkdf2":
-        raise Fatal("Nieznany format pliku %s" % SECRETS_FILE)
+        raise Fatal("Unknown format of file %s" % SECRETS_FILE)
     return decrypt_blob(payload["data"], passphrase)
 
 
@@ -323,13 +323,13 @@ def save_secrets(secrets, passphrase):
 
 
 # ==========================================================================
-#  WALIDACJA I GENEROWANIE KONFIGURACJI
+#  VALIDATION AND CONFIGURATION GENERATION
 # ==========================================================================
 
 def v_match(rx, value, field):
     value = str(value or "").strip()
     if not rx.match(value):
-        raise Fatal("Nieprawidłowa wartość pola '%s': %r" % (field, value))
+        raise Fatal("Invalid value for field '%s': %r" % (field, value))
     return value
 
 
@@ -342,17 +342,17 @@ def v_host(value, field):
         pass
     if re.match(r"^[A-Za-z0-9.-]{1,253}$", value) and "." in value:
         return value
-    raise Fatal("Pole '%s' musi być adresem IP lub nazwą hosta: %r" % (field, value))
+    raise Fatal("Field '%s' must be an IP address or hostname: %r" % (field, value))
 
 
 def v_net(value, field):
     value = str(value or "").strip()
     try:
         if "/" not in value:
-            raise ValueError("brak maski")
+            raise ValueError("missing mask")
         ipaddress.ip_network(value, strict=False)
     except ValueError:
-        raise Fatal("Pole '%s' musi być siecią w formacie CIDR: %r" % (field, value))
+        raise Fatal("Field '%s' must be a network in CIDR format: %r" % (field, value))
     return value
 
 
@@ -361,21 +361,21 @@ def v_ip(value, field):
     try:
         ipaddress.ip_address(value)
     except ValueError:
-        raise Fatal("Pole '%s' musi być adresem IP: %r" % (field, value))
+        raise Fatal("Field '%s' must be an IP address: %r" % (field, value))
     return value
 
 
 def clean(profile):
-    """Profil ze zwalidowanymi polami. Rzuca Fatal przy śmieciach."""
+    """Profile with validated fields. Raises Fatal on garbage input."""
     p = {}
-    p["name"] = v_match(NAME_RE, profile.get("name"), "nazwa profilu")
-    p["right"] = v_host(profile.get("right"), "brama VPN")
-    p["rightsubnet"] = v_net(profile.get("rightsubnet") or "10.0.0.0/8", "sieć zdalna")
-    p["leftid"] = v_match(ID_RE, profile.get("leftid") or "@moj-klucz", "leftid")
+    p["name"] = v_match(NAME_RE, profile.get("name"), "profile name")
+    p["right"] = v_host(profile.get("right"), "VPN gateway")
+    p["rightsubnet"] = v_net(profile.get("rightsubnet") or "10.0.0.0/8", "remote network")
+    p["leftid"] = v_match(ID_RE, profile.get("leftid") or "@my-key", "leftid")
     p["rightid"] = v_match(ID_RE, profile.get("rightid") or p["leftid"], "rightid")
-    p["username"] = v_match(USER_RE, profile.get("username"), "użytkownik XAUTH")
-    p["ike"] = v_match(ALGO_RE, profile.get("ike") or "aes256-sha512;ecp256", "szyfry IKE")
-    p["phase2alg"] = v_match(ALGO_RE, profile.get("phase2alg") or "aes256-sha512", "szyfry ESP")
+    p["username"] = v_match(USER_RE, profile.get("username"), "XAUTH user")
+    p["ike"] = v_match(ALGO_RE, profile.get("ike") or "aes256-sha512;ecp256", "IKE ciphers")
+    p["phase2alg"] = v_match(ALGO_RE, profile.get("phase2alg") or "aes256-sha512", "ESP ciphers")
     p["ikelifetime"] = v_match(NUM_RE, profile.get("ikelifetime") or "86400", "ikelifetime")
     p["salifetime"] = v_match(NUM_RE, profile.get("salifetime") or "43200", "salifetime")
     p["dpddelay"] = v_match(NUM_RE, profile.get("dpddelay") or "5", "dpddelay")
@@ -386,10 +386,10 @@ def clean(profile):
     p["keyexchange"] = "ikev2" if str(profile.get("keyexchange", "ikev1")) == "ikev2" else "ikev1"
 
     iface = str(profile.get("iface") or "auto").strip()
-    p["iface"] = "auto" if iface == "auto" else v_match(IFACE_RE, iface, "interfejs")
+    p["iface"] = "auto" if iface == "auto" else v_match(IFACE_RE, iface, "interface")
 
     vip = str(profile.get("vpn_ip") or "auto").strip()
-    p["vpn_ip"] = "auto" if vip == "auto" else v_ip(vip, "adres VPN")
+    p["vpn_ip"] = "auto" if vip == "auto" else v_ip(vip, "VPN address")
 
     p["psk"] = str(profile.get("psk") or "")
     p["xauth"] = str(profile.get("xauth") or "")
@@ -413,7 +413,7 @@ def secrets_path(p):
 
 def build_conf(p):
     return "\n".join([
-        "# Wygenerowane przez VPN Connector IPsec — ręczne zmiany zostaną nadpisane.",
+        "# Generated by VPN Connector IPsec — manual changes will be overwritten.",
         "conn %s" % conn_name(p),
         "    keyexchange=%s" % p["keyexchange"],
         "    aggressive=%s" % p["aggressive"],
@@ -446,14 +446,14 @@ def build_secrets(p):
     psk = p["psk"].replace("\\", "\\\\").replace('"', '\\"')
     xauth = p["xauth"].replace("\\", "\\\\").replace('"', '\\"')
     return (
-        "# Wygenerowane przez VPN Connector IPsec.\n"
+        "# Generated by VPN Connector IPsec.\n"
         '%s %s : PSK "%s"\n'
         '%%any %s : XAUTH "%s"\n' % (p["leftid"], p["right"], psk, p["username"], xauth)
     )
 
 
 # ==========================================================================
-#  TRYB HELPERA (root, uruchamiany przez pkexec)
+#  HELPER MODE (root, launched via pkexec)
 # ==========================================================================
 
 def log(msg):
@@ -475,21 +475,21 @@ def run(cmd, check=False, quiet=False, timeout=120):
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            text=True, timeout=timeout)
     except FileNotFoundError:
-        log("  ! brak polecenia: %s" % cmd[0])
+        log("  ! command not found: %s" % cmd[0])
         if check:
-            raise Fatal("Brak polecenia %s — czy libreswan jest zainstalowany?" % cmd[0])
+            raise Fatal("Command %s not found — is libreswan installed?" % cmd[0])
         return 127, ""
     except subprocess.TimeoutExpired:
-        log("  ! przekroczono limit czasu: %s" % " ".join(cmd))
+        log("  ! timeout exceeded: %s" % " ".join(cmd))
         if check:
-            raise Fatal("Przekroczono limit czasu: %s" % " ".join(cmd))
+            raise Fatal("Timeout exceeded: %s" % " ".join(cmd))
         return 124, ""
     out = p.stdout or ""
     if out.strip() and not quiet:
         for line in out.rstrip().splitlines():
             log("  " + line)
     if check and p.returncode != 0:
-        raise Fatal("Polecenie nie powiodło się (rc=%d): %s" % (p.returncode, " ".join(cmd)))
+        raise Fatal("Command failed (rc=%d): %s" % (p.returncode, " ".join(cmd)))
     return p.returncode, out
 
 
@@ -529,7 +529,7 @@ def detect_iface():
 
 
 def detect_vpn_ip(p):
-    """Adres przydzielony przez modecfg — czytany ze stanu libreswana."""
+    """The address assigned by modecfg — read from libreswan's status."""
     name = conn_name(p)
     remote = p["right"]
     for _ in range(10):
@@ -574,11 +574,11 @@ def save_state(data):
 
 
 def cleanup_orphans(known):
-    """Kasuje pliki bvpn-*.conf/.secrets profili, których już nie ma na liście."""
+    """Deletes bvpn-*.conf/.secrets files for profiles no longer on the list."""
     keep = set()
     for name in known or []:
         try:
-            keep.add(v_match(NAME_RE, name, "nazwa profilu"))
+            keep.add(v_match(NAME_RE, name, "profile name"))
         except Fatal:
             continue
     removed = []
@@ -605,22 +605,22 @@ def cleanup_orphans(known):
                 removed.append(fname)
                 break
     if removed:
-        log("Usunięto osierocone pliki: %s" % ", ".join(removed))
+        log("Removed orphaned files: %s" % ", ".join(removed))
     return removed
 
 
 def cmd_cleanup(profile):
     removed = cleanup_orphans(profile.get("known"))
     if not removed:
-        log("Nie ma czego sprzątać — w %s nie ma osieroconych plików bvpn-*." % CONF_DIR)
+        log("Nothing to clean up — no orphaned bvpn-* files in %s." % CONF_DIR)
     result(True, removed=removed)
 
 
 def cmd_check_policy():
     problem, detail = policy_status()
     if problem:
-        log("UWAGA: aktywny include crypto-policies (%s)." % detail)
-        log("Wstrzykuje chacha20_poly1305 do IKEv1 i uniemożliwia start usługi.")
+        log("WARNING: crypto-policies include is active (%s)." % detail)
+        log("It injects chacha20_poly1305 into IKEv1 and prevents the service from starting.")
     else:
         log(detail)
     result(True, policy_problem=problem, detail=detail)
@@ -629,20 +629,20 @@ def cmd_check_policy():
 def cmd_fix_policy():
     problem, detail = policy_status()
     if not problem:
-        log("Nie ma czego naprawiać: " + detail)
+        log("Nothing to fix: " + detail)
         result(True, changed=False, policy_problem=False)
     backup = IPSEC_CONF + ".bvpn-backup"
     if not os.path.exists(backup):
         shutil.copy2(IPSEC_CONF, backup)
-        log("Kopia zapasowa: %s" % backup)
+        log("Backup: %s" % backup)
     with open(IPSEC_CONF) as fh:
         lines = fh.readlines()
     out = []
     for raw in lines:
         s = raw.strip()
         if not s.startswith("#") and s.startswith("include") and "libreswan.config" in s:
-            out.append("# wyłączone przez VPN Connector IPsec\n#" + raw)
-            log("Zakomentowano: " + s)
+            out.append("# disabled by VPN Connector IPsec\n#" + raw)
+            log("Commented out: " + s)
         else:
             out.append(raw)
     with open(IPSEC_CONF, "w") as fh:
@@ -657,38 +657,38 @@ def cmd_up(profile):
     problem, _ = policy_status()
     if problem:
         raise Fatal(
-            "W /etc/ipsec.conf jest aktywny 'include %s'. Wstrzykuje chacha20_poly1305 "
-            "do IKEv1 i blokuje start tunelu. Użyj przycisku „Napraw” w oknie aplikacji."
+            "'include %s' is active in /etc/ipsec.conf. It injects chacha20_poly1305 "
+            "into IKEv1 and blocks the tunnel from starting. Use the \"Fix\" button in the app window."
             % POLICY_INCLUDE)
 
     iface = p["iface"]
     if iface == "auto":
         iface = detect_iface()
         if not iface:
-            raise Fatal("Nie udało się wykryć interfejsu z trasą domyślną.")
-        log("Wykryty interfejs: %s" % iface)
+            raise Fatal("Could not detect the interface with the default route.")
+        log("Detected interface: %s" % iface)
 
     os.makedirs(CONF_DIR, exist_ok=True)
-    log("=== [VPN] Zapis konfiguracji ===")
+    log("=== [VPN] Writing configuration ===")
     write_private(conf_path(p), build_conf(p))
     os.chmod(conf_path(p), 0o644)
     write_private(secrets_path(p), build_secrets(p))
     log("  %s" % conf_path(p))
-    log("  %s (0600, kasowany po zestawieniu tunelu)" % secrets_path(p))
+    log("  %s (0600, deleted after the tunnel is up)" % secrets_path(p))
 
-    log("=== [VPN] Czyszczenie starych tras i adresów ===")
+    log("=== [VPN] Clearing old routes and addresses ===")
     run(["ip", "route", "del", p["rightsubnet"], "dev", iface])
     old = read_state().get("vpn_ip")
     if old:
         run(["ip", "addr", "del", old + "/32", "dev", iface])
 
     if p["restart_service"]:
-        log("=== [VPN] Restart usługi ipsec ===")
+        log("=== [VPN] Restarting the ipsec service ===")
         run(["systemctl", "restart", "ipsec"], check=True)
         if not wait_for_pluto():
-            raise Fatal("Usługa ipsec nie wstała. Sprawdź: journalctl -u ipsec -n 50")
+            raise Fatal("The ipsec service did not come up. Check: journalctl -u ipsec -n 50")
 
-    log("=== [VPN] Uruchamianie tunelu IPsec ===")
+    log("=== [VPN] Starting the IPsec tunnel ===")
     run(["ipsec", "rereadsecrets"])
     run(["ipsec", "add", name], check=True)
     rc, out = run(["ipsec", "up", name], timeout=90)
@@ -696,38 +696,38 @@ def cmd_up(profile):
         low = out.lower()
         hint = ""
         if "no acceptable" in low or "no proposal" in low:
-            hint = " Brama odrzuciła zestaw algorytmów — sprawdź szyfry IKE/ESP."
+            hint = " The gateway rejected the cipher set — check the IKE/ESP ciphers."
         elif "xauth" in low and ("fail" in low or "rejected" in low):
-            hint = " Odrzucone dane XAUTH — sprawdź login i hasło."
+            hint = " XAUTH credentials rejected — check the username and password."
         elif "authentication failed" in low or ("psk" in low and "fail" in low):
-            hint = " Nie zgadza się PSK albo leftid/rightid."
+            hint = " PSK or leftid/rightid mismatch."
         shred(secrets_path(p))
-        raise Fatal("Nie udało się zestawić tunelu (rc=%d).%s" % (rc, hint))
+        raise Fatal("Failed to establish the tunnel (rc=%d).%s" % (rc, hint))
 
     vpn_ip = p["vpn_ip"]
     if vpn_ip == "auto":
         vpn_ip = detect_vpn_ip(p)
         if not vpn_ip:
             shred(secrets_path(p))
-            raise Fatal("Tunel wstał, ale nie udało się odczytać adresu z modecfg. "
-                        "Wpisz go ręcznie w polu „Adres VPN”.")
-        log("Adres z modecfg: %s" % vpn_ip)
+            raise Fatal("The tunnel came up, but the address could not be read from modecfg. "
+                        "Enter it manually in the \"VPN address\" field.")
+        log("Address from modecfg: %s" % vpn_ip)
 
     if p["setup_routes"]:
-        log("=== [VPN] Adresacja i split tunneling ===")
+        log("=== [VPN] Addressing and split tunneling ===")
         if not ip_addr_present(iface, vpn_ip):
             run(["ip", "addr", "add", vpn_ip + "/32", "dev", iface])
         run(["ip", "route", "replace", p["rightsubnet"], "dev", iface, "src", vpn_ip])
 
     if not p["keep_secrets"]:
         shred(secrets_path(p))
-        log("Plik z sekretami usunięty z dysku.")
+        log("Secrets file removed from disk.")
 
     cleanup_orphans(profile.get("known") or [p["name"]])
 
     save_state({"connected": True, "profile": p["name"], "conn": name, "iface": iface,
                 "vpn_ip": vpn_ip, "subnet": p["rightsubnet"], "since": int(time.time())})
-    log("=== [VPN] POŁĄCZONO ===")
+    log("=== [VPN] CONNECTED ===")
     result(True, vpn_ip=vpn_ip, iface=iface, conn=name)
 
 
@@ -738,14 +738,14 @@ def cmd_down(profile):
     iface = p["iface"] if p["iface"] != "auto" else (st.get("iface") or detect_iface() or "")
     vpn_ip = p["vpn_ip"] if p["vpn_ip"] != "auto" else st.get("vpn_ip")
 
-    log("=== [VPN] Rozłączanie ===")
+    log("=== [VPN] Disconnecting ===")
     run(["ipsec", "down", name])
     run(["ipsec", "delete", name])
     if p["restart_service"]:
         run(["systemctl", "restart", "ipsec"])
 
     if iface:
-        log("=== [VPN] Sprzątanie adresów i tras na %s ===" % iface)
+        log("=== [VPN] Cleaning up addresses and routes on %s ===" % iface)
         if vpn_ip:
             run(["ip", "route", "del", p["rightsubnet"], "dev", iface, "src", vpn_ip])
             run(["ip", "addr", "del", vpn_ip + "/32", "dev", iface])
@@ -753,7 +753,7 @@ def cmd_down(profile):
 
     shred(secrets_path(p))
     save_state({"connected": False, "profile": p["name"], "since": int(time.time())})
-    log("=== [VPN] ROZŁĄCZONO ===")
+    log("=== [VPN] DISCONNECTED ===")
     result(True)
 
 
@@ -773,9 +773,9 @@ def cmd_status(profile):
 
 def helper_main(argv):
     if os.geteuid() != 0:
-        result(False, error="Tryb --helper wymaga roota (uruchamiany przez pkexec).")
+        result(False, error="--helper mode requires root (must be launched via pkexec).")
     if not argv:
-        result(False, error="Brak komendy.")
+        result(False, error="No command given.")
     cmd = argv[0]
 
     profile = {}
@@ -784,7 +784,7 @@ def helper_main(argv):
         try:
             profile = json.loads(raw) if raw.strip() else {}
         except ValueError as exc:
-            result(False, error="Nieprawidłowy JSON na wejściu: %s" % exc)
+            result(False, error="Invalid JSON on input: %s" % exc)
 
     try:
         if cmd == "up":
@@ -800,17 +800,17 @@ def helper_main(argv):
         elif cmd == "fix-policy":
             cmd_fix_policy()
         else:
-            result(False, error="Nieznana komenda: %s" % cmd)
+            result(False, error="Unknown command: %s" % cmd)
     except Fatal as exc:
-        log("BŁĄD: %s" % exc)
+        log("ERROR: %s" % exc)
         result(False, error=str(exc))
     except Exception as exc:  # noqa: BLE001
-        log("BŁĄD WEWNĘTRZNY: %r" % exc)
+        log("INTERNAL ERROR: %r" % exc)
         result(False, error=repr(exc))
 
 
 # ==========================================================================
-#  GUI (zwykły użytkownik)
+#  GUI (regular user)
 # ==========================================================================
 
 def gui_main(auto_shutdown=False):
@@ -858,10 +858,10 @@ def gui_main(auto_shutdown=False):
             pass
         return out
 
-    # -- uruchamianie helpera przez pkexec --------------------------------
+    # -- launching the helper via pkexec -----------------------------------
 
     class Helper:
-        """pkexec python3 <ten plik> --helper <cmd>; logi linia po linii."""
+        """pkexec python3 <this file> --helper <cmd>; logs streamed line by line."""
 
         def __init__(self, command, profile, on_line, on_done):
             self.on_line = on_line
@@ -876,7 +876,7 @@ def gui_main(auto_shutdown=False):
             try:
                 self.proc = launcher.spawnv(argv)
             except GLib.Error as exc:
-                on_line("BŁĄD: nie udało się uruchomić pkexec (%s)" % exc.message)
+                on_line("ERROR: failed to launch pkexec (%s)" % exc.message)
                 on_done(False, {"error": exc.message})
                 return
 
@@ -900,10 +900,11 @@ def gui_main(auto_shutdown=False):
             except GLib.Error:
                 return
             if not data:
-                # Koniec strumienia: GLib w C zwraca tu NULL, ale przez wadliwą
-                # adnotację introspekcji PyGObject potrafi to być puste b"" zamiast
-                # None — bez sprawdzenia obu przypadków _read() dzwoni się w kółko
-                # (idle-dispatch bez blokowania), co zawiesza GTK i grzeje CPU.
+                # End of stream: GLib in C returns NULL here, but due to a faulty
+                # PyGObject introspection annotation it can come through as an empty
+                # b"" instead of None — without checking for both cases _read() would
+                # call itself over and over (idle-dispatch without blocking), which
+                # freezes GTK and heats up the CPU.
                 return
             line = data.decode("utf-8", "replace") if isinstance(data, bytes) else str(data)
             if line.startswith("##RESULT## "):
@@ -923,12 +924,12 @@ def gui_main(auto_shutdown=False):
                 code = 1
             data = self.result or {}
             if code == 126:
-                data.setdefault("error", "Autoryzacja anulowana.")
+                data.setdefault("error", "Authorization canceled.")
             elif code == 127 and not data:
-                data.setdefault("error", "Nie znaleziono pkexec (pakiet polkit).")
+                data.setdefault("error", "pkexec not found (polkit package).")
             self.on_done(bool(data.get("ok")) and code == 0, data)
 
-    # -- okno -------------------------------------------------------------
+    # -- window --------------------------------------------------------
 
     class Window(Adw.ApplicationWindow):
 
@@ -939,15 +940,15 @@ def gui_main(auto_shutdown=False):
             self.profiles, self.settings = load_store()
             if not self.profiles:
                 first = dict(DEFAULT_PROFILE)
-                first["name"] = "profil-1"
+                first["name"] = "profile-1"
                 self.profiles = [first]
             self.current = 0
             self.busy = False
             self._loading = False
             self._save_source = 0
             self._preset_busy = False
-            self.master = None          # hasło główne w pamięci (tryb "master")
-            self.secrets = None         # {profil: {psk, xauth}} albo None = niewczytane
+            self.master = None          # master password in memory ("master" mode)
+            self.secrets = None         # {profile: {psk, xauth}} or None = not loaded yet
             self.log_lines = []
 
             self.toasts = Adw.ToastOverlay()
@@ -964,13 +965,13 @@ def gui_main(auto_shutdown=False):
             GLib.timeout_add_seconds(3, self._poll_state)
             self.connect("close-request", self._on_close)
 
-        # -- sekrety ------------------------------------------------------
+        # -- secrets ------------------------------------------------------
 
         def _mode(self):
             return self.settings.get("crypt_mode", "machine")
 
         def _passphrase(self):
-            """Hasło do szyfrowania albo None, gdy trzeba o nie zapytać."""
+            """The encryption passphrase, or None when it needs to be asked for."""
             mode = self._mode()
             if mode == "machine":
                 return machine_passphrase()
@@ -979,7 +980,7 @@ def gui_main(auto_shutdown=False):
             return None
 
         def _unlock_if_easy(self):
-            """W trybie 'machine' wczytujemy sekrety od razu, bez pytania."""
+            """In 'machine' mode we load the secrets right away, without asking."""
             if self._mode() != "machine":
                 self.secrets = {} if self._mode() == "none" else None
                 return
@@ -992,7 +993,7 @@ def gui_main(auto_shutdown=False):
                 self.secrets = {}
 
         def _ensure_secrets(self, then):
-            """Wywołuje then() gdy self.secrets jest gotowe (może zapytać o hasło)."""
+            """Calls then() once self.secrets is ready (may prompt for a password)."""
             if self.secrets is not None:
                 then()
                 return
@@ -1004,15 +1005,15 @@ def gui_main(auto_shutdown=False):
 
         def _ask_master(self, then, setting_up=False):
             exists = os.path.exists(SECRETS_FILE)
-            heading = "Ustaw hasło główne" if (setting_up or not exists) else "Hasło główne"
-            body = ("Będzie szyfrować zapisane hasła VPN w pliku dane/sekrety.enc."
+            heading = "Set the master password" if (setting_up or not exists) else "Master password"
+            body = ("Will encrypt the saved VPN passwords in the dane/sekrety.enc file."
                     if (setting_up or not exists)
-                    else "Odblokuj zapisane hasła VPN.")
+                    else "Unlock the saved VPN passwords.")
             dialog = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
             entry = Gtk.PasswordEntry(show_peek_icon=True, activates_default=True)
-            entry.set_placeholder_text("Hasło główne")
+            entry.set_placeholder_text("Master password")
             dialog.set_extra_child(entry)
-            dialog.add_response("cancel", "Anuluj")
+            dialog.add_response("cancel", "Cancel")
             dialog.add_response("ok", "OK")
             dialog.set_default_response("ok")
             dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
@@ -1022,7 +1023,7 @@ def gui_main(auto_shutdown=False):
                     return
                 pw = entry.get_text()
                 if not pw:
-                    self._toast("Puste hasło — pominięto.")
+                    self._toast("Empty password — skipped.")
                     return
                 if not os.path.exists(SECRETS_FILE):
                     self.master = pw
@@ -1034,9 +1035,9 @@ def gui_main(auto_shutdown=False):
                     self.master = pw
                     then()
                 except Fatal:
-                    self._toast("Złe hasło główne.")
+                    self._toast("Wrong master password.")
                 except (OSError, ValueError) as exc:
-                    self._toast("Nie udało się odczytać sekretów: %s" % exc)
+                    self._toast("Failed to read secrets: %s" % exc)
 
             dialog.connect("response", resp)
             dialog.present()
@@ -1047,7 +1048,7 @@ def gui_main(auto_shutdown=False):
             if self.secrets is None:
                 return
             if not openssl_available():
-                self._toast("Brak openssl — hasła nie zostaną zapisane.")
+                self._toast("openssl missing — passwords will not be saved.")
                 return
             pw = self._passphrase()
             if not pw:
@@ -1055,29 +1056,29 @@ def gui_main(auto_shutdown=False):
             try:
                 save_secrets(self.secrets, pw)
             except (Fatal, OSError) as exc:
-                self._toast("Nie udało się zapisać haseł: %s" % exc)
+                self._toast("Failed to save passwords: %s" % exc)
 
-        # -- budowa interfejsu --------------------------------------------
+        # -- building the interface ---------------------------------------
 
         def _build_header(self):
             header = Adw.HeaderBar()
-            self.title = Adw.WindowTitle(title="VPN Connector IPsec", subtitle="rozłączony")
+            self.title = Adw.WindowTitle(title="VPN Connector IPsec", subtitle="disconnected")
             header.set_title_widget(self.title)
 
-            add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Nowy profil")
+            add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="New profile")
             add.connect("clicked", self._on_add)
             header.pack_start(add)
 
             menu = Gio.Menu()
-            menu.append("Duplikuj profil", "win.duplicate")
-            menu.append("Usuń profil", "win.delete")
-            menu.append("Sprawdź crypto-policies", "win.checkpolicy")
-            menu.append("Posprzątaj /etc/ipsec.d", "win.cleanup")
-            menu.append("Gdzie są dane?", "win.where")
+            menu.append("Duplicate profile", "win.duplicate")
+            menu.append("Delete profile", "win.delete")
+            menu.append("Check crypto-policies", "win.checkpolicy")
+            menu.append("Clean up /etc/ipsec.d", "win.cleanup")
+            menu.append("Where is the data?", "win.where")
             header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
 
             self.log_toggle = Gtk.ToggleButton(icon_name="utilities-terminal-symbolic",
-                                               tooltip_text="Logi")
+                                               tooltip_text="Logs")
             self.log_toggle.connect(
                 "toggled", lambda b: self.log_revealer.set_reveal_child(b.get_active()))
             header.pack_end(self.log_toggle)
@@ -1095,7 +1096,7 @@ def gui_main(auto_shutdown=False):
         def _build_body(self):
             outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
-            self.banner = Adw.Banner(title="", button_label="Napraw", revealed=False)
+            self.banner = Adw.Banner(title="", button_label="Fix", revealed=False)
             self.banner.connect("button-clicked", self._on_fix_policy)
             outer.append(self.banner)
 
@@ -1151,65 +1152,65 @@ def gui_main(auto_shutdown=False):
             self.rows = {}
             page = Adw.PreferencesPage()
 
-            g1 = Adw.PreferencesGroup(title="Połączenie")
+            g1 = Adw.PreferencesGroup(title="Connection")
             page.add(g1)
-            self._entry(g1, "Nazwa profilu", "name", "Litery, cyfry, myślnik, podkreślnik")
-            self._entry(g1, "Brama VPN (right)", "right", "np. 203.0.113.1")
-            self._entry(g1, "Sieć zdalna (rightsubnet)", "rightsubnet", "np. 10.0.0.0/8")
-            self._entry(g1, "Użytkownik XAUTH", "username")
+            self._entry(g1, "Profile name", "name", "Letters, digits, hyphen, underscore")
+            self._entry(g1, "VPN gateway (right)", "right", "e.g. 203.0.113.1")
+            self._entry(g1, "Remote network (rightsubnet)", "rightsubnet", "e.g. 10.0.0.0/8")
+            self._entry(g1, "XAUTH user", "username")
 
             g5 = Adw.PreferencesGroup(
-                title="Hasła",
-                description="Zapisywane w dane/sekrety.enc — AES-256-CBC, klucz z PBKDF2 "
-                            "(%d iteracji). W profile.json haseł nie ma." % PBKDF2_ITER)
+                title="Passwords",
+                description="Saved in dane/sekrety.enc — AES-256-CBC, key from PBKDF2 "
+                            "(%d iterations). Not stored in profile.json." % PBKDF2_ITER)
             page.add(g5)
-            self.psk_row = Adw.PasswordEntryRow(title="Klucz PSK")
+            self.psk_row = Adw.PasswordEntryRow(title="PSK key")
             self.psk_row.connect("changed", self._on_secret_changed, "psk")
             g5.add(self.psk_row)
-            self.xauth_row = Adw.PasswordEntryRow(title="Hasło XAUTH")
+            self.xauth_row = Adw.PasswordEntryRow(title="XAUTH password")
             self.xauth_row.connect("changed", self._on_secret_changed, "xauth")
             g5.add(self.xauth_row)
-            self.crypt_row = Adw.ComboRow(title="Ochrona zapisanych haseł",
+            self.crypt_row = Adw.ComboRow(title="Saved password protection",
                                           model=Gtk.StringList.new(CRYPT_LABELS))
             self.crypt_row.set_selected(CRYPT_MODES.index(self._mode()))
             self.crypt_row.connect("notify::selected", self._on_crypt_mode)
             g5.add(self.crypt_row)
 
-            g2 = Adw.PreferencesGroup(title="Szyfrowanie tunelu")
+            g2 = Adw.PreferencesGroup(title="Tunnel encryption")
             page.add(g2)
             self.preset_row = Adw.ComboRow(
-                title="Zestaw algorytmów",
+                title="Cipher set",
                 model=Gtk.StringList.new([p[0] for p in PRESETS] + [CUSTOM_LABEL]))
             self.preset_row.connect("notify::selected", self._on_preset)
             g2.add(self.preset_row)
-            self._entry(g2, "Faza 1 — IKE (ike=)", "ike", "szyfr-hash;grupaDH")
-            self._entry(g2, "Faza 2 — ESP (phase2alg=)", "phase2alg", "szyfr-hash")
-            self._switch(g2, "PFS", "Perfect Forward Secrecy dla fazy 2", "pfs")
-            self._switch(g2, "Aggressive mode", "Wymagane przez FortiGate w IKEv1", "aggressive")
-            self._switch(g2, "Enkapsulacja NAT-T", "encapsulation=yes", "encapsulation")
+            self._entry(g2, "Phase 1 — IKE (ike=)", "ike", "cipher-hash;DHgroup")
+            self._entry(g2, "Phase 2 — ESP (phase2alg=)", "phase2alg", "cipher-hash")
+            self._switch(g2, "PFS", "Perfect Forward Secrecy for phase 2", "pfs")
+            self._switch(g2, "Aggressive mode", "Required by FortiGate in IKEv1", "aggressive")
+            self._switch(g2, "NAT-T encapsulation", "encapsulation=yes", "encapsulation")
 
-            g3 = Adw.PreferencesGroup(title="Tożsamość i sieć")
+            g3 = Adw.PreferencesGroup(title="Identity and network")
             page.add(g3)
-            self._entry(g3, "leftid", "leftid", "np. @moj-klucz")
-            self._entry(g3, "rightid", "rightid", "np. @moj-klucz")
-            self.iface_row = Adw.ComboRow(title="Interfejs",
-                                          subtitle="„auto” — z trasy domyślnej",
+            self._entry(g3, "leftid", "leftid", "e.g. @my-key")
+            self._entry(g3, "rightid", "rightid", "e.g. @my-key")
+            self.iface_row = Adw.ComboRow(title="Interface",
+                                          subtitle="“auto” — from the default route",
                                           model=Gtk.StringList.new(list_interfaces()))
             self.iface_row.connect("notify::selected", self._on_iface)
             g3.add(self.iface_row)
-            self._entry(g3, "Adres VPN", "vpn_ip",
-                        "„auto” — odczyt z modecfg, albo wpisz na sztywno")
+            self._entry(g3, "VPN address", "vpn_ip",
+                        "“auto” — read from modecfg, or enter a fixed address")
 
-            g4 = Adw.PreferencesGroup(title="Zaawansowane")
+            g4 = Adw.PreferencesGroup(title="Advanced")
             page.add(g4)
             self._entry(g4, "ikelifetime (s)", "ikelifetime")
             self._entry(g4, "salifetime (s)", "salifetime")
             self._entry(g4, "dpddelay (s)", "dpddelay")
             self._entry(g4, "dpdtimeout (s)", "dpdtimeout")
-            self._switch(g4, "Restart usługi ipsec",
-                         "Przed połączeniem i po rozłączeniu", "restart_service")
-            self._switch(g4, "Ustawiaj adres i trasy",
-                         "Split tunneling po zestawieniu tunelu", "setup_routes")
+            self._switch(g4, "Restart the ipsec service",
+                         "Before connecting and after disconnecting", "restart_service")
+            self._switch(g4, "Set address and routes",
+                         "Split tunneling once the tunnel is up", "setup_routes")
 
             sw = Gtk.ScrolledWindow(vexpand=True)
             sw.set_child(page)
@@ -1223,7 +1224,7 @@ def gui_main(auto_shutdown=False):
             bar.set_margin_end(16)
 
             self.status_icon = Gtk.Image.new_from_icon_name("network-vpn-disabled-symbolic")
-            self.status_label = Gtk.Label(label="Rozłączony", xalign=0)
+            self.status_label = Gtk.Label(label="Disconnected", xalign=0)
             self.status_label.add_css_class("dim-label")
             self.spinner = Gtk.Spinner()
             bar.append(self.status_icon)
@@ -1231,11 +1232,11 @@ def gui_main(auto_shutdown=False):
             bar.append(self.spinner)
             bar.append(Gtk.Box(hexpand=True))
 
-            self.btn_disconnect = Gtk.Button(label="Rozłącz")
+            self.btn_disconnect = Gtk.Button(label="Disconnect")
             self.btn_disconnect.connect("clicked", self._on_disconnect)
             bar.append(self.btn_disconnect)
 
-            self.btn_connect = Gtk.Button(label="Połącz")
+            self.btn_connect = Gtk.Button(label="Connect")
             self.btn_connect.add_css_class("suggested-action")
             self.btn_connect.connect("clicked", self._on_connect)
             bar.append(self.btn_connect)
@@ -1245,7 +1246,7 @@ def gui_main(auto_shutdown=False):
             box.append(bar)
             return box
 
-        # -- profile ------------------------------------------------------
+        # -- profiles -------------------------------------------------------
 
         def _build_profile_list(self):
             self._loading = True
@@ -1256,7 +1257,7 @@ def gui_main(auto_shutdown=False):
                 child = nxt
             for p in self.profiles:
                 self.listbox.append(Adw.ActionRow(title=p["name"],
-                                                  subtitle=p.get("right") or "brak bramy"))
+                                                  subtitle=p.get("right") or "no gateway"))
             self._loading = False
             row = self.listbox.get_row_at_index(self.current)
             if row:
@@ -1354,7 +1355,7 @@ def gui_main(auto_shutdown=False):
                         os.unlink(SECRETS_FILE)
                 except OSError:
                     pass
-                self._toast("Hasła nie będą zapisywane; plik sekrety.enc usunięty.")
+                self._toast("Passwords will no longer be saved; sekrety.enc file deleted.")
                 self._do_save()
                 return
             if new == "master":
@@ -1364,21 +1365,21 @@ def gui_main(auto_shutdown=False):
                 def after():
                     self.secrets = keep
                     self._persist_secrets()
-                    self._toast("Hasła przeszyfrowane hasłem głównym.")
+                    self._toast("Passwords re-encrypted with the master password.")
                     self._do_save()
 
                 self._ask_master(after, setting_up=True)
                 return
             self.secrets = keep
             self._persist_secrets()
-            self._toast("Hasła zaszyfrowane kluczem tego komputera.")
+            self._toast("Passwords encrypted with this computer's key.")
             self._do_save()
 
         def _sync_preset(self):
-            """Ustawia listę zestawów pod to, co jest w polach ike/phase2alg.
+            """Sets the preset list to match what's in the ike/phase2alg fields.
 
-            Nigdy nie wołane w środku obsługi zmiany samej listy — set_selected()
-            wewnątrz własnego notify::selected zawiesza GtkSingleSelection.
+            Never called from inside the handler for the list's own change —
+            set_selected() inside its own notify::selected freezes GtkSingleSelection.
             """
             if self._preset_busy:
                 return
@@ -1423,19 +1424,19 @@ def gui_main(auto_shutdown=False):
             try:
                 save_store(self.profiles, self.settings)
             except OSError as exc:
-                self._toast("Nie udało się zapisać profili: %s" % exc)
+                self._toast("Failed to save profiles: %s" % exc)
             self._persist_secrets()
             row = self.listbox.get_row_at_index(self.current)
             if row:
                 p = self.profiles[self.current]
                 row.set_title(p["name"] or "—")
-                row.set_subtitle(p.get("right") or "brak bramy")
+                row.set_subtitle(p.get("right") or "no gateway")
             return False
 
         def _on_add(self, *_a):
             self._collect()
             p = dict(DEFAULT_PROFILE)
-            p["name"] = "profil-%d" % (len(self.profiles) + 1)
+            p["name"] = "profile-%d" % (len(self.profiles) + 1)
             self.profiles.append(p)
             self._build_profile_list()
             self._load_profile(len(self.profiles) - 1)
@@ -1443,7 +1444,7 @@ def gui_main(auto_shutdown=False):
 
         def _on_duplicate(self, *_a):
             src = dict(self._collect())
-            src["name"] = (src["name"] + "-kopia")[:48]
+            src["name"] = (src["name"] + "-copy")[:48]
             self.profiles.append(src)
             self._build_profile_list()
             self._load_profile(len(self.profiles) - 1)
@@ -1451,13 +1452,13 @@ def gui_main(auto_shutdown=False):
 
         def _on_delete(self, *_a):
             if len(self.profiles) <= 1:
-                self._toast("Musi zostać przynajmniej jeden profil.")
+                self._toast("At least one profile must remain.")
                 return
             dialog = Adw.MessageDialog(
-                transient_for=self, heading="Usunąć profil?",
-                body="Profil „%s” zostanie skasowany." % self.profiles[self.current]["name"])
-            dialog.add_response("cancel", "Anuluj")
-            dialog.add_response("delete", "Usuń")
+                transient_for=self, heading="Delete profile?",
+                body="Profile “%s” will be deleted." % self.profiles[self.current]["name"])
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("delete", "Delete")
             dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
             dialog.connect("response", self._delete_response)
             dialog.present()
@@ -1475,7 +1476,7 @@ def gui_main(auto_shutdown=False):
             self._do_save()
 
         def _on_where(self, *_a):
-            self._toast("Dane: %s" % DATA_DIR)
+            self._toast("Data: %s" % DATA_DIR)
 
         def _on_cleanup(self, *_a):
             self._collect()
@@ -1484,14 +1485,14 @@ def gui_main(auto_shutdown=False):
             def done(ok, res):
                 removed = res.get("removed") or []
                 if not ok:
-                    self._toast(res.get("error", "Nie udało się posprzątać."))
+                    self._toast(res.get("error", "Cleanup failed."))
                 elif removed:
-                    self._toast("Usunięto %d osieroconych plików." % len(removed))
+                    self._toast("Removed %d orphaned files." % len(removed))
                 else:
-                    self._toast("Nie było czego sprzątać.")
+                    self._toast("Nothing to clean up.")
 
             self._run("cleanup", {"known": known},
-                      "Sprzątanie /etc/ipsec.d…", done)
+                      "Cleaning up /etc/ipsec.d…", done)
 
         # -- status -------------------------------------------------------
 
@@ -1501,13 +1502,13 @@ def gui_main(auto_shutdown=False):
             connected = bool(st.get("connected")) and st.get("profile") == p["name"]
             if connected:
                 self.status_icon.set_from_icon_name("network-vpn-symbolic")
-                self.status_label.set_label("Połączony  ·  %s na %s"
+                self.status_label.set_label("Connected  ·  %s on %s"
                                             % (st.get("vpn_ip", "?"), st.get("iface", "?")))
-                self.title.set_subtitle("połączony")
+                self.title.set_subtitle("connected")
             else:
                 self.status_icon.set_from_icon_name("network-vpn-disabled-symbolic")
-                self.status_label.set_label("Rozłączony")
-                self.title.set_subtitle("rozłączony")
+                self.status_label.set_label("Disconnected")
+                self.title.set_subtitle("disconnected")
             self.btn_connect.set_sensitive(not self.busy and not connected)
             self.btn_disconnect.set_sensitive(not self.busy and connected)
 
@@ -1519,8 +1520,8 @@ def gui_main(auto_shutdown=False):
         def _check_policy_banner(self):
             problem, _ = policy_status()
             if problem:
-                self.banner.set_title("W /etc/ipsec.conf aktywny jest include "
-                                      "crypto-policies — blokuje IKEv1 (chacha20_poly1305).")
+                self.banner.set_title("The crypto-policies include is active in "
+                                      "/etc/ipsec.conf — it blocks IKEv1 (chacha20_poly1305).")
                 self.banner.set_revealed(True)
             else:
                 self.banner.set_revealed(False)
@@ -1528,15 +1529,15 @@ def gui_main(auto_shutdown=False):
         def _on_check_policy(self, *_a):
             self._check_policy_banner()
             if not self.banner.get_revealed():
-                self._toast("crypto-policies OK — include jest wyłączony.")
+                self._toast("crypto-policies OK — include is disabled.")
 
         def _on_fix_policy(self, *_a):
             def done(ok, res):
                 self._check_policy_banner()
-                self._toast("Poprawione." if ok else res.get("error", "Nie udało się."))
-            self._run("fix-policy", {}, "Naprawianie /etc/ipsec.conf…", done)
+                self._toast("Fixed." if ok else res.get("error", "Failed."))
+            self._run("fix-policy", {}, "Fixing /etc/ipsec.conf…", done)
 
-        # -- akcje --------------------------------------------------------
+        # -- actions --------------------------------------------------------
 
         def _log(self, line):
             self.log_lines.append(line)
@@ -1577,7 +1578,7 @@ def gui_main(auto_shutdown=False):
             def on_done(ok, res):
                 self._set_busy(False)
                 if not ok and res.get("error"):
-                    self._log("BŁĄD: " + res["error"])
+                    self._log("ERROR: " + res["error"])
                 self._flush_log()
                 done_cb(ok, res)
 
@@ -1595,7 +1596,7 @@ def gui_main(auto_shutdown=False):
             def go():
                 p = self._payload()
                 if not p.get("right") or not p.get("username"):
-                    self._toast("Uzupełnij bramę VPN i użytkownika XAUTH.")
+                    self._toast("Fill in the VPN gateway and XAUTH user.")
                     return
                 if not p.get("psk") or not p.get("xauth"):
                     self._ask_secrets(p)
@@ -1604,20 +1605,20 @@ def gui_main(auto_shutdown=False):
             self._ensure_secrets(go)
 
         def _ask_secrets(self, p):
-            dialog = Adw.MessageDialog(transient_for=self, heading="Dane logowania",
-                                       body="Profil „%s”" % p["name"])
+            dialog = Adw.MessageDialog(transient_for=self, heading="Login credentials",
+                                       body="Profile “%s”" % p["name"])
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             psk = Gtk.PasswordEntry(show_peek_icon=True)
-            psk.set_placeholder_text("Klucz PSK")
+            psk.set_placeholder_text("PSK key")
             psk.set_text(p.get("psk", ""))
             xa = Gtk.PasswordEntry(show_peek_icon=True)
-            xa.set_placeholder_text("Hasło XAUTH")
+            xa.set_placeholder_text("XAUTH password")
             xa.set_text(p.get("xauth", ""))
             box.append(psk)
             box.append(xa)
             dialog.set_extra_child(box)
-            dialog.add_response("cancel", "Anuluj")
-            dialog.add_response("ok", "Połącz")
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("ok", "Connect")
             dialog.set_default_response("ok")
             dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
 
@@ -1633,18 +1634,18 @@ def gui_main(auto_shutdown=False):
 
         def _do_connect(self, p):
             def done(ok, res):
-                self._toast(("Połączono — %s" % res.get("vpn_ip", "")) if ok
-                            else res.get("error", "Nie udało się połączyć."))
-            self._run("up", p, "Łączenie z %s…" % p["name"], done)
+                self._toast(("Connected — %s" % res.get("vpn_ip", "")) if ok
+                            else res.get("error", "Failed to connect."))
+            self._run("up", p, "Connecting to %s…" % p["name"], done)
 
         def _on_disconnect(self, *_a):
             def done(ok, res):
-                self._toast("Rozłączono." if ok else res.get("error", "Błąd rozłączania."))
-            self._run("down", self._payload(), "Rozłączanie…", done)
+                self._toast("Disconnected." if ok else res.get("error", "Disconnect error."))
+            self._run("down", self._payload(), "Disconnecting…", done)
 
         def shutdown_after_disconnect(self):
-            """Wywoływane z trayu (akcja 'rozlacz-i-zamknij') albo z --auto-shutdown:
-            rozłącz aktywny profil (jeśli jest połączony) i dopiero potem zamknij okno."""
+            """Called from the tray (action 'rozlacz-i-zamknij') or from --auto-shutdown:
+            disconnect the active profile (if connected) and only then close the window."""
             st = read_state()
             if not st.get("connected"):
                 self.close()
@@ -1656,9 +1657,9 @@ def gui_main(auto_shutdown=False):
 
             def done(ok, res):
                 if not ok:
-                    self._toast(res.get("error", "Błąd rozłączania."))
+                    self._toast(res.get("error", "Disconnect error."))
                 self.close()
-            self._run("down", self._payload(), "Rozłączanie…", done)
+            self._run("down", self._payload(), "Disconnecting…", done)
 
         def _on_close(self, *_a):
             if self._save_source:
@@ -1696,30 +1697,30 @@ def gui_main(auto_shutdown=False):
                 GLib.timeout_add(400, _selftest, self, win)
 
     def _selftest(app, win):
-        """Przeklikanie okna bez udziału użytkownika (BVPN_SELFTEST=1)."""
+        """Clicks through the window without user involvement (BVPN_SELFTEST=1)."""
         try:
             win.rows["right"].set_text("203.0.113.1")
             win.rows["username"].set_text("testuser")
-            win.psk_row.set_text("psk-testowy")
-            win.xauth_row.set_text("xauth-testowe")
+            win.psk_row.set_text("test-psk")
+            win.xauth_row.set_text("test-xauth")
             win._on_add()
-            win.rows["name"].set_text("drugi-profil")
+            win.rows["name"].set_text("second-profile")
             win.rows["right"].set_text("10.20.30.40")
-            win.psk_row.set_text("drugi-psk")
+            win.psk_row.set_text("second-psk")
             win._do_save()
             win.preset_row.set_selected(4)
-            assert win.rows["ike"].get_text() == "aes256-sha1;modp1024", "preset nie ustawił ike"
+            assert win.rows["ike"].get_text() == "aes256-sha1;modp1024", "preset did not set ike"
             win.rows["ike"].set_text("aes256-sha512;ecp256")
             win.rows["phase2alg"].set_text("aes256-sha512")
-            assert win.preset_row.get_selected() == 0, "preset nie wrócił do zestawu 0"
+            assert win.preset_row.get_selected() == 0, "preset did not return to set 0"
             win._on_duplicate()
             win.listbox.select_row(win.listbox.get_row_at_index(0))
             win._load_profile(0)
-            assert win.psk_row.get_text() == "psk-testowy", "sekret nie wrócił po zmianie profilu"
+            assert win.psk_row.get_text() == "test-psk", "secret did not come back after profile switch"
             win._on_delete()
             win.crypt_row.set_selected(0)
             win._do_save()
-            win._log("selftest: log działa")
+            win._log("selftest: log works")
             win._flush_log()
             win._toast("selftest")
             win._refresh_status()
@@ -1727,13 +1728,13 @@ def gui_main(auto_shutdown=False):
             names = [p["name"] for p in data["profiles"]]
             blob = open(SECRETS_FILE).read()
             sec = load_secrets(machine_passphrase())
-            assert "psk-testowy" not in blob, "hasło jawne w pliku!"
-            assert sec[names[0]]["psk"] == "psk-testowy", "sekret nie zaszyfrował się poprawnie"
-            print("SELFTEST OK — profile: %s, sekrety: %s" % (names, sorted(sec)))
+            assert "test-psk" not in blob, "plaintext password in file!"
+            assert sec[names[0]]["psk"] == "test-psk", "secret did not encrypt correctly"
+            print("SELFTEST OK — profiles: %s, secrets: %s" % (names, sorted(sec)))
         except Exception as exc:  # noqa: BLE001
             import traceback
             traceback.print_exc()
-            print("SELFTEST BŁĄD: %r" % exc)
+            print("SELFTEST ERROR: %r" % exc)
         app.quit()
         return False
 
@@ -1741,18 +1742,19 @@ def gui_main(auto_shutdown=False):
 
 
 # ==========================================================================
-#  TRAY (wskaźnik połączenia w KDE Plasma) — osobny proces, osobny GTK 3
+#  TRAY (connection indicator on KDE Plasma) — separate process, separate GTK 3
 # ==========================================================================
 
 def tray_main():
-    """Ikonka w trayu: startowana przez GUI przy pierwszym uruchomieniu,
-    ale żyje niezależnie od okna (start_new_session). Czyta dane/stan.json,
-    nie dotyka libreswana ani pkexec bezpośrednio — do rozłączenia zawsze
-    prosi działającą (albo dopiero startowaną) instancję GUI.
+    """The tray icon: launched by the GUI on first startup, but lives
+    independently of the window (start_new_session). Reads dane/stan.json,
+    never touches libreswan or pkexec directly — to disconnect it always
+    asks the running (or just-started) GUI instance.
 
-    Wymaga libayatana-appindicator-gtk3 (albo starszego libappindicator-gtk3).
-    Ta biblioteka wystawia menu jako Gtk.Menu z GTK 3 — stąd osobny proces,
-    żeby nigdy nie ładować GTK 3 i GTK 4 razem w jednym interpreterze co GUI.
+    Requires libayatana-appindicator-gtk3 (or the older libappindicator-gtk3).
+    That library exposes its menu as a GTK 3 Gtk.Menu — hence the separate
+    process, so GTK 3 and GTK 4 are never loaded together in the same
+    interpreter as the GUI.
     """
     if not _tray_acquire_lock():
         return 0
@@ -1769,7 +1771,7 @@ def tray_main():
         from gi.repository import Gtk, GLib, Gio
     except (ImportError, ValueError) as exc:
         sys.stderr.write(
-            "Brak wskaźnika trayu (%s).\n"
+            "Tray indicator unavailable (%s).\n"
             "Fedora: sudo dnf install libayatana-appindicator-gtk3\n" % exc)
         _tray_release_lock()
         return 1
@@ -1817,8 +1819,8 @@ def tray_main():
         Gtk.main_quit()
 
     def _quit_give_up():
-        # Coś nie zadziałało w rozsądnym czasie (np. rozłączanie się zawiesiło) —
-        # nie czekamy w nieskończoność, można spróbować "Zamknij" jeszcze raz.
+        # Something didn't work out in a reasonable time (e.g. disconnecting
+        # hung) — we don't wait forever; "Close" can be tried again.
         _quit_watch_stop()
         return False
 
@@ -1826,9 +1828,9 @@ def tray_main():
         quit_state["seen_appeared"] += 1
 
     def _quit_on_vanished(_conn, _name):
-        # g_bus_watch_name woła vanished-handler też jako stan początkowy, gdy
-        # nazwa jeszcze nie ma właściciela — ignorujemy to, liczy się tylko
-        # zniknięcie PO tym, jak GUI faktycznie się pojawiło na magistrali.
+        # g_bus_watch_name also calls the vanished handler as an initial state,
+        # when the name doesn't have an owner yet — we ignore that; only a
+        # disappearance AFTER the GUI has actually appeared on the bus counts.
         if quit_state["seen_appeared"] > 0:
             _quit_finish()
 
@@ -1857,10 +1859,10 @@ def tray_main():
     indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
 
     menu = Gtk.Menu()
-    item_show = Gtk.MenuItem(label="Pokaż")
+    item_show = Gtk.MenuItem(label="Show")
     item_show.connect("activate", on_show)
     menu.append(item_show)
-    item_quit = Gtk.MenuItem(label="Zamknij")
+    item_quit = Gtk.MenuItem(label="Close")
     item_quit.connect("activate", on_quit)
     menu.append(item_quit)
     menu.show_all()
@@ -1869,9 +1871,9 @@ def tray_main():
     def refresh(*_a):
         st = read_state()
         if st.get("connected"):
-            indicator.set_icon_full(TRAY_ICON_ON, "Połączony — %s" % st.get("profile", ""))
+            indicator.set_icon_full(TRAY_ICON_ON, "Connected — %s" % st.get("profile", ""))
         else:
-            indicator.set_icon_full(TRAY_ICON_OFF, "Rozłączony")
+            indicator.set_icon_full(TRAY_ICON_OFF, "Disconnected")
         return True
 
     refresh()
@@ -1898,7 +1900,7 @@ def main():
         return gui_main(auto_shutdown=auto_shutdown)
     except (ImportError, ValueError) as exc:
         sys.stderr.write(
-            "Brakuje GTK4/libadwaita dla Pythona (%s).\n"
+            "Missing GTK4/libadwaita for Python (%s).\n"
             "Fedora:  sudo dnf install python3-gobject gtk4 libadwaita\n" % exc)
         return 1
 
