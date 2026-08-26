@@ -24,6 +24,9 @@ chmod +x vpn-connector-ipsec.py
 ./vpn-connector-ipsec.py
 ```
 
+To get an entry in your application launcher, pick **"Add to application menu"**
+from the app's menu — it writes the `.desktop` file with the correct path itself.
+
 ## What it does
 
 Add a profile (gateway, network, `leftid`/`rightid`, XAUTH login/password, PSK)

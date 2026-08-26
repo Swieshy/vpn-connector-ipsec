@@ -3,8 +3,11 @@
 Type=Application
 Name=VPN Connector IPsec
 Comment=VPN connection (IPsec / IKEv1 aggressive + XAUTH)
-# CHANGE the path to wherever the script actually is:
-Exec=/home/UZYTKOWNIK/vpn-connector-ipsec/vpn-connector-ipsec.py
+# You normally do not need this file: run the app and pick "Add to application
+# menu" from its menu — it writes a correct entry to ~/.local/share/applications
+# with the real path. Kept here only as a reference. Exec= is not run through a
+# shell, so $HOME and ~ do NOT work; the path below goes through sh to expand it.
+Exec=sh -c 'exec "$HOME/vpn-connector-ipsec/vpn-connector-ipsec.py"'
 Icon=network-vpn
 Terminal=false
 Categories=Network;Security;GTK;

@@ -918,6 +918,77 @@ def helper_main(argv):
 
 
 # ==========================================================================
+#  APPLICATION MENU SHORTCUT (regular user, no root)
+# ==========================================================================
+
+DESKTOP_FILE_NAME = "vpn-connector-ipsec.desktop"
+
+
+# Characters the Desktop Entry spec reserves inside Exec=; an argument containing
+# any of them has to be wrapped in double quotes.
+_DESKTOP_RESERVED = set(' \t\n"\'\\><~|&;$*?#()`')
+
+
+def _desktop_quote(arg):
+    """Quotes one Exec= argument per the freedesktop Desktop Entry spec.
+
+    Exec= is NOT passed through a shell, so $HOME/~/${VAR} are never expanded —
+    the path has to be absolute and literal. A '%' would be read as a field code
+    (%f, %U …) and must be doubled. Quotes are added only when actually needed:
+    some launchers are picky about a quoted program name.
+    """
+    arg = arg.replace("%", "%%")
+    if not any(ch in _DESKTOP_RESERVED for ch in arg):
+        return arg
+    escaped = arg.replace("\\", "\\\\").replace('"', '\\"')
+    return '"%s"' % escaped
+
+
+def desktop_entry_path():
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "applications", DESKTOP_FILE_NAME)
+
+
+def install_desktop_entry():
+    """Writes the .desktop entry with this file's real location.
+
+    The shipped .desktop cannot know where the user unpacked the project, and
+    Exec= has no way to reference $HOME, so the placeholder path in it always had
+    to be edited by hand. Generating the file here removes that step, and running
+    it again after moving the folder simply rewrites the path. python3 is invoked
+    explicitly so the entry keeps working even without the +x bit on the script.
+    """
+    python = sys.executable or "/usr/bin/python3"
+    body = "\n".join([
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=VPN Connector IPsec",
+        "Comment=VPN connection (IPsec / IKEv1 aggressive + XAUTH)",
+        "Exec=%s %s" % (_desktop_quote(python), _desktop_quote(SELF)),
+        "Path=%s" % APP_DIR,
+        "Icon=network-vpn",
+        "Terminal=false",
+        "Categories=Network;Security;GTK;",
+        "Keywords=vpn;ipsec;libreswan;",
+        "StartupNotify=true",
+        "",
+    ])
+    path = desktop_entry_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(body)
+    os.replace(tmp, path)
+    os.chmod(path, 0o644)
+    # Harmless if missing or if it fails — KDE and GNOME both pick the file up on
+    # their own; this only makes it show up faster.
+    if shutil.which("update-desktop-database"):
+        subprocess.run(["update-desktop-database", os.path.dirname(path)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return path
+
+
+# ==========================================================================
 #  GUI (regular user)
 # ==========================================================================
 
@@ -1206,6 +1277,7 @@ def gui_main(auto_shutdown=False):
             menu.append("Delete profile", "win.delete")
             menu.append("Check crypto-policies", "win.checkpolicy")
             menu.append("Clean up /etc/ipsec.d", "win.cleanup")
+            menu.append("Add to application menu", "win.shortcut")
             menu.append("Where is the data?", "win.where")
             header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
 
@@ -1219,6 +1291,7 @@ def gui_main(auto_shutdown=False):
                              ("delete", self._on_delete),
                              ("checkpolicy", self._on_check_policy),
                              ("cleanup", self._on_cleanup),
+                             ("shortcut", self._on_shortcut),
                              ("where", self._on_where)):
                 act = Gio.SimpleAction.new(name, None)
                 act.connect("activate", cb)
@@ -1609,6 +1682,14 @@ def gui_main(auto_shutdown=False):
             self._build_profile_list()
             self._load_profile(self.current)
             self._do_save()
+
+        def _on_shortcut(self, *_a):
+            try:
+                path = install_desktop_entry()
+            except OSError as exc:
+                self._toast("Could not write the menu entry: %s" % exc)
+                return
+            self._toast("Added to the application menu: %s" % path)
 
         def _on_where(self, *_a):
             self._toast("Data: %s" % DATA_DIR)

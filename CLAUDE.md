@@ -210,15 +210,23 @@ and states plainly that it's about the algorithms.
 
 ## Application menu shortcut (optional)
 
-The package includes `vpn-connector-ipsec.desktop`. Fix the `Exec=` path in
-it to match yours, then:
+Menu → **"Add to application menu"** writes
+`~/.local/share/applications/vpn-connector-ipsec.desktop` with this file's real
+location, so nothing has to be edited by hand. Run it again after moving the
+folder and the path is rewritten. Nothing else gets installed on the system, and
+no root is involved.
 
-```bash
-mkdir -p ~/.local/share/applications
-cp vpn-connector-ipsec.desktop ~/.local/share/applications/
-```
+`install_desktop_entry()` invokes `python3` explicitly rather than the script
+itself, so the entry keeps working even without the `+x` bit. Note that `Exec=`
+is **not** passed through a shell: `$HOME`, `~` and `${VAR}` are never expanded,
+which is exactly why the shipped `.desktop` used to carry a hand-edited
+placeholder path. A `%` in the path has to be doubled, or it is read as a field
+code (`%f`, `%U`), and arguments containing spaces need double quotes — see
+`_desktop_quote()`, which quotes only when needed because some launchers dislike
+a quoted program name.
 
-Nothing else gets installed on the system.
+The shipped `vpn-connector-ipsec.desktop` is kept as a reference only; it routes
+through `sh -c` so that `$HOME` can be expanded at all.
 
 ## Diagnostics
 
