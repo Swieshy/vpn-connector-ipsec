@@ -208,6 +208,53 @@ The "Tunnel encryption" section: a list of ready-made sets (Rafał's
 gateway rejects the proposal, the app recognizes `no acceptable proposal`
 and states plainly that it's about the algorithms.
 
+## Sharing the tunnel with virtual machines (optional)
+
+Section "Virtual machines": a per-profile switch plus the VM subnet (default
+`192.168.150.0/24`). Off by default. When on, a successful connect installs
+nftables rules and disconnect removes them.
+
+**Why routing alone cannot work.** The IPsec SA's traffic selector is
+`<vpn_ip>/32 === <rightsubnet>`, so the kernel only encrypts packets whose
+*source* is the address modecfg handed out. A packet forwarded from a VM keeps
+the VM's own address, misses the selector and would leave the machine in the
+clear. So the VM traffic has to be SNATed onto the VPN address — see
+`share_setup()`.
+
+Everything goes into our own `ip vpnconnector` table: removal is atomic and
+total, it cannot collide with the tables firewalld and libvirt manage, and it
+survives `firewall-cmd --reload` (firewalld only flushes its own).
+
+Two details that are easy to get wrong:
+
+- **Chain priority 90, i.e. before `srcnat` (100).** libvirt adds a `masquerade`
+  rule for its NAT networks. `masquerade` picks the source from the outgoing
+  interface, which is the LAN address — the VPN address only sits there as an
+  extra `/32` — so the packet would fall out of the tunnel. Running first means
+  NAT is already fixed by the time libvirt's rule is reached.
+- **MSS clamping.** Without it the IPsec overhead shows up as "ssh connects but
+  HTTPS and large transfers hang". Clamped in both directions, because each side
+  announces its own MSS; `syn / syn,rst` matches SYN and SYN+ACK alike. If
+  `rt mtu` turns out not to reflect the tunnel path, a fixed MSS is the fallback.
+
+`share_teardown()` also runs on every connect and on every disconnect regardless
+of the switch: the rules must never outlive the address they SNAT to, and the
+modecfg address changes between connections. `net.ipv4.ip_forward` is enabled if
+needed but deliberately never reverted — other things on the machine may rely
+on it.
+
+Guest side, for reference: a second NIC on a libvirt network. `<forward
+mode='route'/>` is the cleanest, because libvirt then adds no NAT of its own; a
+plain `nat` network works too thanks to the priority above. In the guest set
+`ipv4.never-default yes` on that connection, or it will fight the first NIC over
+the default route. A `dhcp-option=121,<subnet>,<bridge-ip>` in the network XML
+pushes the route into guests automatically; a network created through
+virt-manager will not have it, so the route has to be added in the guest or the
+option added with `virsh net-edit`.
+
+This is the one feature that touches the host firewall, which is otherwise
+outside this program's scope — it was added on explicit request.
+
 ## Application menu shortcut (optional)
 
 Menu → **"Add to application menu"** writes

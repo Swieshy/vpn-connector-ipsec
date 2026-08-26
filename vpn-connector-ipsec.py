@@ -90,6 +90,8 @@ DEFAULT_PROFILE = {
     "restart_service": True,
     "setup_routes": True,
     "otp": False,
+    "share_vms": False,
+    "share_subnet": "192.168.150.0/24",
 }
 
 
@@ -394,6 +396,10 @@ def clean(profile):
 
     p["psk"] = str(profile.get("psk") or "")
     p["xauth"] = str(profile.get("xauth") or "")
+    p["share_vms"] = bool(profile.get("share_vms", False))
+    p["share_subnet"] = v_net(profile.get("share_subnet") or "192.168.150.0/24", "VM subnet")
+    if is_full_tunnel(p["share_subnet"]):
+        raise Fatal("The VM subnet must not be a /0 — that would NAT the whole internet.")
     p["keep_secrets"] = bool(profile.get("keep_secrets", False))
     p["restart_service"] = bool(profile.get("restart_service", True))
     p["setup_routes"] = bool(profile.get("setup_routes", True))
@@ -574,6 +580,85 @@ def detect_vpn_ip(p):
 def ip_addr_present(iface, addr):
     _, out = run(["ip", "-o", "addr", "show", "dev", iface], quiet=True)
     return re.search(r"\b%s/" % re.escape(addr), out) is not None
+
+
+# ---- sharing the tunnel with local virtual machines ----------------------
+#
+# The IPsec SA's traffic selector is <vpn_ip>/32 === <rightsubnet>, so only packets
+# whose SOURCE is the address handed out by modecfg get encrypted. A packet coming
+# from a VM keeps the VM's address, misses the selector entirely and would leave the
+# machine in the clear. Routing alone therefore cannot work — the VM traffic has to
+# be SNATed to the VPN address on the way out.
+#
+# Everything lives in our own nftables table: removal is then atomic and total, it
+# cannot collide with the tables firewalld and libvirt manage, and it survives a
+# `firewall-cmd --reload` (firewalld only flushes its own).
+NFT_TABLE = "vpnconnector"
+
+
+def nft_available():
+    return shutil.which("nft") is not None
+
+
+def share_teardown():
+    """Drops our nftables table if it exists. Idempotent, safe to call always."""
+    if not nft_available():
+        return
+    rc, _ = run(["nft", "list", "table", "ip", NFT_TABLE], quiet=True)
+    if rc != 0:
+        return
+    run(["nft", "delete", "table", "ip", NFT_TABLE])
+    log("  VM sharing rules removed.")
+
+
+def share_setup(subnet, remote, vpn_ip):
+    """SNATs <subnet> -> <remote> onto vpn_ip and clamps MSS for that path."""
+    if not nft_available():
+        log("  ! nft not found — skipping VM sharing (install nftables).")
+        return False
+
+    # Forwarding is normally already on because libvirt enables it, but a routed
+    # network may have been defined without ever starting. Deliberately not reverted
+    # on disconnect: other things on the machine may rely on it.
+    try:
+        with open("/proc/sys/net/ipv4/ip_forward") as fh:
+            forwarding = fh.read().strip() == "1"
+    except OSError:
+        forwarding = False
+    if not forwarding:
+        run(["sysctl", "-w", "net.ipv4.ip_forward=1"], quiet=True)
+
+    share_teardown()
+    steps = [
+        ["nft", "add", "table", "ip", NFT_TABLE],
+        # priority 90 puts this before srcnat (100), i.e. before libvirt's own
+        # masquerade. That rule would otherwise rewrite the source to the address of
+        # the outgoing interface — the LAN address, not the VPN one — and the packet
+        # would fall out of the tunnel.
+        ["nft", "add", "chain", "ip", NFT_TABLE, "postrouting",
+         "{ type nat hook postrouting priority 90 ; policy accept ; }"],
+        ["nft", "add", "rule", "ip", NFT_TABLE, "postrouting",
+         "ip", "saddr", subnet, "ip", "daddr", remote, "snat", "to", vpn_ip],
+        # Without MSS clamping the IPsec overhead shows up as "ssh connects but large
+        # transfers and HTTPS hang". Both directions, because each side announces its
+        # own MSS; "syn / syn,rst" matches SYN and SYN+ACK alike.
+        ["nft", "add", "chain", "ip", NFT_TABLE, "forward",
+         "{ type filter hook forward priority -150 ; policy accept ; }"],
+        ["nft", "add", "rule", "ip", NFT_TABLE, "forward",
+         "ip", "daddr", remote, "tcp", "flags", "syn", "/", "syn,rst",
+         "tcp", "option", "maxseg", "size", "set", "rt", "mtu"],
+        ["nft", "add", "rule", "ip", NFT_TABLE, "forward",
+         "ip", "saddr", remote, "tcp", "flags", "syn", "/", "syn,rst",
+         "tcp", "option", "maxseg", "size", "set", "rt", "mtu"],
+    ]
+    for step in steps:
+        rc, _ = run(step)
+        if rc != 0:
+            log("  ! could not install the VM sharing rules — rolling back.")
+            share_teardown()
+            return False
+    log("  VMs in %s reach %s through %s." % (subnet, remote, vpn_ip))
+    return True
 
 
 def wait_for_pluto(timeout=20):
@@ -805,6 +890,17 @@ def cmd_up(profile):
         else:
             run(["ip", "route", "replace", p["rightsubnet"], "dev", iface, "src", vpn_ip])
 
+    # Stale rules from an earlier connection would point at the previous modecfg
+    # address, so tear them down whether or not sharing is switched on now.
+    share_teardown()
+    if p["share_vms"]:
+        log("=== [VPN] Sharing with virtual machines ===")
+        if is_full_tunnel(p["rightsubnet"]):
+            log("  rightsubnet is %s and the default route is left alone, so there is"
+                " nothing to share — skipped." % p["rightsubnet"])
+        else:
+            share_setup(p["share_subnet"], p["rightsubnet"], vpn_ip)
+
     if not p["keep_secrets"]:
         shred(secrets_path(p))
         log("Secrets file removed from disk.")
@@ -825,6 +921,9 @@ def cmd_down(profile):
     vpn_ip = p["vpn_ip"] if p["vpn_ip"] != "auto" else st.get("vpn_ip")
 
     log("=== [VPN] Disconnecting ===")
+    # Unconditionally — the switch may have been turned off while connected, and the
+    # rules must not outlive the address they SNAT to.
+    share_teardown()
     run(["ipsec", "down", name])
     run(["ipsec", "delete", name])
     if p["restart_service"]:
@@ -1408,6 +1507,16 @@ def gui_main(auto_shutdown=False):
             g3.add(self.iface_row)
             self._entry(g3, "VPN address", "vpn_ip",
                         "“auto” — read from modecfg, or enter a fixed address")
+
+            g6 = Adw.PreferencesGroup(
+                title="Virtual machines",
+                description="SNATs traffic from the VM subnet onto the VPN address, so "
+                            "libvirt guests reach the remote network too. Needs nftables.")
+            page.add(g6)
+            self._switch(g6, "Share the tunnel with VMs",
+                         "Rules are added on connect and removed on disconnect",
+                         "share_vms")
+            self._entry(g6, "VM subnet", "share_subnet", "e.g. 192.168.150.0/24")
 
             g4 = Adw.PreferencesGroup(title="Advanced")
             page.add(g4)
