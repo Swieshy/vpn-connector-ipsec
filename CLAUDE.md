@@ -417,6 +417,41 @@ eliminates the timing gap entirely, regardless of how fast the GUI closes.
 If you add similar "wait until something on D-Bus finishes" logic, use this
 pattern, not timer-based polling.
 
+### 8. The XAUTH index in `.secrets` must be an ID (`@user`), not a bare name
+
+`build_secrets()` writes two lines: the PSK, indexed by `leftid` + gateway
+address, and the XAUTH password, indexed by the XAUTH user. That second index
+**has to carry the `@`**:
+
+```
+@my-group 203.0.113.1 : PSK "..."
+@vpn-user : XAUTH "..."
+```
+
+pluto looks the XAUTH password up through `lsw_get_xauthsecret()`, which builds
+an `ID_FQDN` out of `leftusername`. A bare `vpn-user` is parsed as a hostname,
+libreswan reports
+
+```
+ERROR "/etc/ipsec.d/bvpn-<profile>.secrets" line 3: index "vpn-user" not a
+numeric IPv4 address and name lookup failed (no validation performed)
+```
+
+and the entry then never matches. The failure is misleading: phase 1 comes up
+fine (`ISAKMP SA established`), then pluto answers the XAUTH challenge with an
+empty password three times, and the gateway responds with `Delete SA`. It reads
+exactly like a wrong password or a token prompt, so the app's own hint
+("XAUTH rejected by the gateway") points in the wrong direction. If XAUTH fails,
+**read the `rereadsecrets` output in the log first** — that `ERROR` line is the
+tell.
+
+This bug hid for a long time because Rafał's oldest profile also matched his
+hand-written `/etc/ipsec.d/<name>.secrets` (no `bvpn-` prefix, so neither
+`cleanup_orphans` nor `purge_generated` ever touches it), which has the correct
+syntax. That one profile worked; every new one failed. When a profile "works
+only for the original connection," check for legacy secrets files supplying
+what the generated one doesn't.
+
 ## Testing without a VPN
 
 The code has a headless self-test — it clicks through the window and checks
