@@ -20,12 +20,17 @@ sudo dnf install libayatana-appindicator-gtk3
 No installer — unpack anywhere and run:
 
 ```bash
-chmod +x vpn-connector-ipsec.py
-./vpn-connector-ipsec.py
+chmod +x vpn-connector-ipsec
+./vpn-connector-ipsec
 ```
 
 To get an entry in your application launcher, pick **"Add to application menu"**
 from the app's menu — it writes the `.desktop` file with the correct path itself.
+
+Or run `./install.sh`, which does that *and* symlinks the app into
+`~/.local/bin`, so you can start it by typing `vpn-connector-ipsec` anywhere.
+Nothing is copied into the system and no root is needed; `./install.sh
+--uninstall` removes both again and leaves your `dane/` folder alone.
 
 ## What it does
 

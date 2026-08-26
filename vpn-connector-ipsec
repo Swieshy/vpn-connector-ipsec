@@ -5,7 +5,7 @@ VPN Connector IPsec — a portable GUI for libreswan (IKEv1 aggressive + XAUTH).
 
 No installation needed. Run as a regular user:
 
-    ./vpn-connector-ipsec.py
+    ./vpn-connector-ipsec
 
 Everything that needs root (writing to /etc/ipsec.d, ipsec, ip, systemctl) is
 done by this same file, re-launched via pkexec in --helper mode. The GUI never
@@ -34,7 +34,10 @@ import sys
 import time
 
 APP_ID = "org.example.vpnconnectoripsec"
-SELF = os.path.abspath(__file__)
+# realpath, not abspath: install.sh puts a symlink in ~/.local/bin, and the data
+# folder plus the pkexec target must resolve to the real file, not to the link —
+# otherwise dane/ would be created next to the symlink.
+SELF = os.path.realpath(__file__)
 APP_DIR = os.path.dirname(SELF)
 
 CONF_DIR = "/etc/ipsec.d"
@@ -2259,6 +2262,14 @@ def main():
         return tray_main()
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print(__doc__)
+        return 0
+    # Used by install.sh so the .desktop quoting lives in one place only.
+    if len(sys.argv) > 1 and sys.argv[1] == "--install-desktop":
+        try:
+            print(install_desktop_entry())
+        except OSError as exc:
+            sys.stderr.write("Could not write the desktop entry: %s\n" % exc)
+            return 1
         return 0
     auto_shutdown = len(sys.argv) > 1 and sys.argv[1] == "--auto-shutdown"
     try:

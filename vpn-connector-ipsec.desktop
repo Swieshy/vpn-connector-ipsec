@@ -7,7 +7,7 @@ Comment=VPN connection (IPsec / IKEv1 aggressive + XAUTH)
 # menu" from its menu — it writes a correct entry to ~/.local/share/applications
 # with the real path. Kept here only as a reference. Exec= is not run through a
 # shell, so $HOME and ~ do NOT work; the path below goes through sh to expand it.
-Exec=sh -c 'exec "$HOME/vpn-connector-ipsec/vpn-connector-ipsec.py"'
+Exec=sh -c 'exec "$HOME/vpn-connector-ipsec/vpn-connector-ipsec"'
 Icon=network-vpn
 Terminal=false
 Categories=Network;Security;GTK;

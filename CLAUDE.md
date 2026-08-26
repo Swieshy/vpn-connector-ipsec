@@ -16,8 +16,8 @@ selection, and log preview.
 **No installer.** Unpack anywhere and run:
 
 ```bash
-chmod +x vpn-connector-ipsec.py
-./vpn-connector-ipsec.py
+chmod +x vpn-connector-ipsec
+./vpn-connector-ipsec
 ```
 
 Requirements (Fedora usually has these out of the box): `libreswan`, `polkit`,
@@ -49,7 +49,11 @@ along the way:
    libadwaita via PyGObject (already present on Fedora, single process, no
    background daemon).
 2. "better without an installer, make it a portable application" → a single
-   `.py` file, no `install.sh`, no polkit policy in `/usr/share`.
+   executable Python file, nothing under `/usr`, no polkit policy in
+   `/usr/share`. Later softened on request with `install.sh`, which only
+   symlinks into `~/.local/bin` and writes a launcher entry — see "Making it
+   look installed" below. That is not an installation and does not change this
+   rule.
 3. "all data saved in a folder next to the file, passwords hashed if
    possible" → a `dane/` directory next to the script, passwords encrypted
    (not hashed — hashing is one-way, and libreswan needs plaintext; this was
@@ -107,7 +111,7 @@ Passwords never end up in `profile.json` or in the logs.
 ## Tray icon (KDE Plasma)
 
 On the GUI's first startup it also launches the tray indicator — a separate
-process (`./vpn-connector-ipsec.py --tray`), independent of the window:
+process (`./vpn-connector-ipsec --tray`), independent of the window:
 closing the app window (via the X button) does **not** close the tray, and
 that's the point — the icon is meant to show connection status even when you
 don't have the window open.
@@ -146,7 +150,7 @@ without it.
 ## Permissions
 
 The GUI runs as a regular user. When root is needed, it launches **this same
-file** again: `pkexec python3 vpn-connector-ipsec.py --helper <command>`. The
+file** again: `pkexec python3 vpn-connector-ipsec --helper <command>`. The
 profile configuration goes to it as JSON over stdin, and the helper
 validates every field with a regex before it touches `/etc/ipsec.d`, `ipsec`,
 `ip`, or `systemctl`. polkit caches authorization for a few minutes by
@@ -158,8 +162,9 @@ section below.
 
 Each profile has its own pair, recreated on every connection:
 
-- `/etc/ipsec.d/bvpn-<profile>.conf` — overwritten with the form's contents
-  on "Connect", stays on disk (chmod 644, nothing sensitive).
+- `/etc/ipsec.d/bvpn-<profile>.conf` — overwritten with the form's contents on
+  "Connect" (chmod 600, since it carries `leftusername`), kept while the tunnel
+  is up and removed on disconnect.
 - `/etc/ipsec.d/bvpn-<profile>.secrets` — created (chmod 600) right before
   `ipsec up`, zeroed out and deleted right after the tunnel is established.
 
@@ -255,6 +260,34 @@ option added with `virsh net-edit`.
 This is the one feature that touches the host firewall, which is otherwise
 outside this program's scope — it was added on explicit request.
 
+## Making it look installed (optional)
+
+`./install.sh` gives the illusion of a system program without installing one:
+a symlink in `~/.local/bin` so `vpn-connector-ipsec` works from any shell, plus
+the launcher entry. Nothing is copied, nothing goes under `/usr`, no root is
+involved, and `./install.sh --uninstall` removes both (leaving `dane/` alone).
+
+The file itself has **no `.py` extension** for the same cosmetic reason — the
+user asked for it not to look like a loose script. Two consequences:
+
+- `SELF` uses `os.path.realpath()`, not `abspath()`. Through the `~/.local/bin`
+  symlink an `abspath()` would put `dane/` next to the *link*, so profiles and
+  passwords would silently move to `~/.local/bin/dane`.
+- `install.sh` does not write the `.desktop` file itself; it calls
+  `--install-desktop`, so the spec's quoting rules live in
+  `install_desktop_entry()` only.
+
+**A real binary is not the answer, and this was considered.** The app gets root
+through `pkexec python3 <this file>`, which works precisely because the
+*interpreter* is root-owned; pkexec refuses a user-owned executable. So a
+PyInstaller/Nuitka bundle would have to be installed into `/usr/bin` to be
+usable at all — i.e. a real installation. On top of that, bundling PyGObject
+with GTK4 *and* the tray's GTK 3 in one artifact is a well-known source of
+pain. If the goal ever becomes "installs like a normal Fedora program", the
+honest answer is an RPM (root-owned `/usr/bin` plus a proper polkit action,
+which would also close the "whoever can write this file gets root" hole), not
+a bundled binary.
+
 ## Application menu shortcut (optional)
 
 Menu → **"Add to application menu"** writes
@@ -285,7 +318,7 @@ through `sh -c` so that `$HOME` can be expanded at all.
 | Tunnel comes up, no traffic | `ip route get 10.0.0.1` — is the route going through the right interface |
 | Address not read from modecfg | enter **VPN address** manually |
 | Forgotten master password | delete `dane/sekrety.enc` and re-enter the passwords |
-| Window hangs, CPU heats up | collect a traceback: `PYTHONFAULTHANDLER=1 timeout -s ABRT 25 ./vpn-connector-ipsec.py` — see "Testing without a VPN" |
+| Window hangs, CPU heats up | collect a traceback: `PYTHONFAULTHANDLER=1 timeout -s ABRT 25 ./vpn-connector-ipsec` — see "Testing without a VPN" |
 | Tray doesn't show up | check whether `libayatana-appindicator-gtk3` is installed; the terminal message will say what's missing |
 
 ## Uninstalling
@@ -310,7 +343,7 @@ with a diff) — only the `conn` name changes, to `bvpn-<profile>`.
 
 ## Architecture
 
-A single file, `vpn-connector-ipsec.py`, with three roles:
+A single file, `vpn-connector-ipsec`, with three roles:
 
 - **GUI** (`gui_main()`) — regular user, GTK4/libadwaita. Never has root.
 - **helper** (`helper_main()`, invoked as `--helper <cmd>`) — root, launched
@@ -328,7 +361,7 @@ the default `org.freedesktop.policykit.exec` is used (`auth_admin_keep` for
 the active session — password once every few minutes).
 
 **Security consequence to keep in mind:** whoever can write to
-`vpn-connector-ipsec.py` will, after pkexec authorization, run their code as
+`vpn-connector-ipsec` will, after pkexec authorization, run their code as
 root. This is the same level of trust as your own script run via sudo. Don't
 put this file in a directory writable by others.
 
@@ -430,9 +463,9 @@ a new channel: `App` registers the `"rozlacz-i-zamknij"` action
 checks `org.freedesktop.DBus.NameHasOwner` for `APP_ID`: if the GUI is
 already running, it calls
 `Gio.DBusActionGroup.get(...).activate_action("rozlacz-i-zamknij", None)`;
-if not, it starts `vpn-connector-ipsec.py --auto-shutdown`, which itself
+if not, it starts `vpn-connector-ipsec --auto-shutdown`, which itself
 calls `Window.shutdown_after_disconnect()` after showing the window. "Show"
-from the tray is just launching `vpn-connector-ipsec.py` with no arguments —
+from the tray is just launching `vpn-connector-ipsec` with no arguments —
 the uniqueness of `APP_ID` in `Gio.Application` (default flags, no
 `NON_UNIQUE`) activates the existing window on its own instead of creating a
 second one.
@@ -513,7 +546,7 @@ The code has a headless self-test — it clicks through the window and checks
 assertions:
 
 ```bash
-rm -rf dane && BVPN_SELFTEST=1 xvfb-run -a timeout 40 python3 -u vpn-connector-ipsec.py
+rm -rf dane && BVPN_SELFTEST=1 xvfb-run -a timeout 40 python3 -u vpn-connector-ipsec
 # expected: "SELFTEST OK — profiles: [...], secrets: [...]"
 ```
 
@@ -532,7 +565,7 @@ sensible messages:
 
 ```bash
 echo '{"name":"t","right":"1.2.3.4","rightsubnet":"10.0.0.0/8","username":"u"}' \
-  | sudo python3 vpn-connector-ipsec.py --helper up
+  | sudo python3 vpn-connector-ipsec --helper up
 ```
 
 Note: `pyflakes` passes cleanly — keep it that way.
