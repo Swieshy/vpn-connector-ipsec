@@ -14,7 +14,7 @@ runs with root privileges.
 All data lands in the "dane/" folder next to this script:
     dane/profile.json      — profiles without passwords
     dane/sekrety.enc       — passwords, encrypted with AES-256 (openssl, PBKDF2)
-    dane/stan.json         — connection state
+    dane/stan.json         — state of every tunnel that is up (several at a time)
     dane/ostatni-log.txt   — log of the last session
     dane/tray.pid          — PID of the tray indicator (KDE Plasma), single instance
 
@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 APP_ID = "org.example.vpnconnectoripsec"
@@ -107,7 +108,20 @@ class Fatal(Exception):
 # ==========================================================================
 
 def data_dir():
-    """The 'dane' folder next to the script. If it's not writable — ~/.config."""
+    """The 'dane' folder next to the script. If it's not writable — ~/.config.
+
+    Under BVPN_SELFTEST it is a throwaway directory instead. The self-test writes
+    profiles and secrets exactly like a real run, so pointing it at the real dane/
+    would overwrite the user's own profiles — and "start from a clean state" would
+    mean deleting them first. That `rm -rf dane` has already destroyed a real
+    profile.json and sekrety.enc once; the test must not need it.
+    """
+    if os.environ.get("BVPN_SELFTEST"):
+        scratch = os.path.join(tempfile.gettempdir(),
+                               "vpn-connector-selftest-%d" % os.getpid())
+        shutil.rmtree(scratch, ignore_errors=True)
+        os.makedirs(scratch, exist_ok=True)
+        return scratch
     candidate = os.path.join(APP_DIR, "dane")
     try:
         os.makedirs(candidate, exist_ok=True)
@@ -150,15 +164,28 @@ _TRAY_ICON_OFF_SVG = (
     '  <circle cx="12" cy="12" r="8.5" fill="none" stroke="#9a9996" stroke-width="3"/>\n'
     '</svg>\n'
 )
+# Two or more tunnels at once: two circles, so "one" and "several" are told apart at
+# a glance and not only from the tooltip.
+_TRAY_ICON_MULTI_SVG = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">\n'
+    '  <circle cx="8.5" cy="12" r="6.5" fill="#26a269"/>\n'
+    '  <circle cx="16" cy="12" r="6.5" fill="#26a269" stroke="#000000"\n'
+    '          stroke-opacity="0.35" stroke-width="1.5"/>\n'
+    '</svg>\n'
+)
 TRAY_ICON_ON = "vpn-connector-ipsec-on"
 TRAY_ICON_OFF = "vpn-connector-ipsec-off"
+TRAY_ICON_MULTI = "vpn-connector-ipsec-multi"
 
 
 def _ensure_tray_icons():
     """Writes our own tray SVGs to dane/icons/, if not already there."""
     try:
         os.makedirs(TRAY_ICON_DIR, exist_ok=True)
-        for name, svg in ((TRAY_ICON_ON, _TRAY_ICON_ON_SVG), (TRAY_ICON_OFF, _TRAY_ICON_OFF_SVG)):
+        for name, svg in ((TRAY_ICON_ON, _TRAY_ICON_ON_SVG),
+                          (TRAY_ICON_OFF, _TRAY_ICON_OFF_SVG),
+                          (TRAY_ICON_MULTI, _TRAY_ICON_MULTI_SVG)):
             path = os.path.join(TRAY_ICON_DIR, name + ".svg")
             if not os.path.exists(path):
                 with open(path, "w") as fh:
@@ -173,6 +200,24 @@ def read_state():
             return json.load(fh)
     except (OSError, ValueError):
         return {}
+
+
+def read_connections():
+    """Every tunnel that is up right now, keyed by profile name.
+
+    More than one profile can be connected at a time, so the state file holds a
+    dict of records instead of a single slot. The pre-multi-connection format
+    (flat "connected"/"profile"/"vpn_ip" keys at the top level) is still read, so
+    an upgrade in the middle of a live tunnel doesn't lose track of it.
+    """
+    st = read_state()
+    conns = st.get("connections")
+    if isinstance(conns, dict):
+        return {k: v for k, v in conns.items() if isinstance(v, dict)}
+    if st.get("connected") and st.get("profile"):
+        rec = {k: st[k] for k in ("conn", "iface", "vpn_ip", "subnet", "since") if k in st}
+        return {st["profile"]: rec}
+    return {}
 
 
 def _tray_acquire_lock():
@@ -423,6 +468,31 @@ def is_full_tunnel(subnet):
         return False
 
 
+def conflicting_connection(name, subnet, others):
+    """(profile, subnet) of a live tunnel whose remote network overlaps this one.
+
+    Several tunnels can be up at once, but only while their remote networks are
+    disjoint: the route for rightsubnet carries one src address, and `ip route
+    replace` would silently hand the overlapping range to whichever profile
+    connected last — traffic would leave through the wrong tunnel with no error
+    anywhere. Two full tunnels collide for the same reason.
+    """
+    try:
+        net = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        return None
+    for other, rec in (others or {}).items():
+        if other == name:
+            continue
+        try:
+            theirs = ipaddress.ip_network(rec.get("subnet") or "", strict=False)
+        except ValueError:
+            continue
+        if net.overlaps(theirs):
+            return other, str(theirs)
+    return None
+
+
 def conn_name(p):
     return PREFIX + p["name"]
 
@@ -597,24 +667,70 @@ def ip_addr_present(iface, addr):
 # cannot collide with the tables firewalld and libvirt manage, and it survives a
 # `firewall-cmd --reload` (firewalld only flushes its own).
 NFT_TABLE = "vpnconnector"
+# Every rule we add carries comment "vpnconn:<profile>". With several tunnels up at
+# once the table is shared, so dropping the whole table is no longer an acceptable
+# way to clean up after one profile — the comment is what makes removal selective.
+NFT_TAG = "vpnconn"
 
 
 def nft_available():
     return shutil.which("nft") is not None
 
 
-def share_teardown():
-    """Drops our nftables table if it exists. Idempotent, safe to call always."""
-    if not nft_available():
-        return
-    rc, _ = run(["nft", "list", "table", "ip", NFT_TABLE], quiet=True)
-    if rc != 0:
-        return
-    run(["nft", "delete", "table", "ip", NFT_TABLE])
-    log("  VM sharing rules removed.")
+def _nft_table_exists():
+    return run(["nft", "list", "table", "ip", NFT_TABLE], quiet=True)[0] == 0
 
 
-def share_setup(subnet, remote, vpn_ip):
+def _nft_dump():
+    rc, out = run(["nft", "-a", "-nn", "list", "table", "ip", NFT_TABLE], quiet=True)
+    return out if rc == 0 else ""
+
+
+def _nft_handles(dump, profile):
+    """[(chain, handle)] for the rules tagged with this profile, newest first.
+
+    Deleting by handle in reverse order keeps the remaining handles valid, which
+    nft guarantees anyway, but it also keeps the output readable when it fails.
+    """
+    tag = '"%s:%s"' % (NFT_TAG, profile)
+    found = []
+    chain = None
+    for line in dump.splitlines():
+        m = re.match(r"\s*chain\s+(\S+)\s*\{", line)
+        if m:
+            chain = m.group(1)
+            continue
+        if chain and "comment " + tag in line:
+            h = re.search(r"# handle (\d+)", line)
+            if h:
+                found.append((chain, h.group(1)))
+    found.reverse()
+    return found
+
+
+def share_teardown(profile=None):
+    """Removes the sharing rules of one profile, or the whole table (profile=None).
+
+    Dropping the table is only correct when nothing else is sharing; with a profile
+    given we delete just its tagged rules and take the table down once the last of
+    them is gone. Idempotent, safe to call always.
+    """
+    if not nft_available() or not _nft_table_exists():
+        return
+    if profile is None:
+        run(["nft", "delete", "table", "ip", NFT_TABLE])
+        log("  VM sharing rules removed.")
+        return
+    handles = _nft_handles(_nft_dump(), profile)
+    for chain, handle in handles:
+        run(["nft", "delete", "rule", "ip", NFT_TABLE, chain, "handle", handle])
+    if handles:
+        log("  VM sharing rules for “%s” removed." % profile)
+    if '"%s:' % NFT_TAG not in _nft_dump():
+        run(["nft", "delete", "table", "ip", NFT_TABLE])
+
+
+def share_setup(profile, subnet, remote, vpn_ip):
     """SNATs <subnet> -> <remote> onto vpn_ip and clamps MSS for that path."""
     if not nft_available():
         log("  ! nft not found — skipping VM sharing (install nftables).")
@@ -631,8 +747,12 @@ def share_setup(subnet, remote, vpn_ip):
     if not forwarding:
         run(["sysctl", "-w", "net.ipv4.ip_forward=1"], quiet=True)
 
-    share_teardown()
+    share_teardown(profile)
+    # nft wants the comment as a quoted string; argv items are joined by nft itself.
+    tag = '"%s:%s"' % (NFT_TAG, profile)
     steps = [
+        # "add" on an existing table or chain with the same spec is a no-op, which is
+        # what we want: another profile may already be sharing through this table.
         ["nft", "add", "table", "ip", NFT_TABLE],
         # priority 90 puts this before srcnat (100), i.e. before libvirt's own
         # masquerade. That rule would otherwise rewrite the source to the address of
@@ -641,7 +761,8 @@ def share_setup(subnet, remote, vpn_ip):
         ["nft", "add", "chain", "ip", NFT_TABLE, "postrouting",
          "{ type nat hook postrouting priority 90 ; policy accept ; }"],
         ["nft", "add", "rule", "ip", NFT_TABLE, "postrouting",
-         "ip", "saddr", subnet, "ip", "daddr", remote, "snat", "to", vpn_ip],
+         "ip", "saddr", subnet, "ip", "daddr", remote, "snat", "to", vpn_ip,
+         "comment", tag],
         # Without MSS clamping the IPsec overhead shows up as "ssh connects but large
         # transfers and HTTPS hang". Both directions, because each side announces its
         # own MSS; "syn / syn,rst" matches SYN and SYN+ACK alike.
@@ -649,16 +770,16 @@ def share_setup(subnet, remote, vpn_ip):
          "{ type filter hook forward priority -150 ; policy accept ; }"],
         ["nft", "add", "rule", "ip", NFT_TABLE, "forward",
          "ip", "daddr", remote, "tcp", "flags", "syn", "/", "syn,rst",
-         "tcp", "option", "maxseg", "size", "set", "rt", "mtu"],
+         "tcp", "option", "maxseg", "size", "set", "rt", "mtu", "comment", tag],
         ["nft", "add", "rule", "ip", NFT_TABLE, "forward",
          "ip", "saddr", remote, "tcp", "flags", "syn", "/", "syn,rst",
-         "tcp", "option", "maxseg", "size", "set", "rt", "mtu"],
+         "tcp", "option", "maxseg", "size", "set", "rt", "mtu", "comment", tag],
     ]
     for step in steps:
         rc, _ = run(step)
         if rc != 0:
             log("  ! could not install the VM sharing rules — rolling back.")
-            share_teardown()
+            share_teardown(profile)
             return False
     log("  VMs in %s reach %s through %s." % (subnet, remote, vpn_ip))
     return True
@@ -683,6 +804,13 @@ def save_state(data):
         os.chmod(STATE_FILE, 0o644)
     except OSError:
         pass
+
+
+def save_connections(conns):
+    """Writes the whole set of live tunnels. "connected" is kept as a top-level
+    convenience flag (the tray and the window both want "is anything up?")."""
+    save_state({"connections": conns, "connected": bool(conns),
+                "updated": int(time.time())})
 
 
 def cleanup_orphans(known):
@@ -733,14 +861,14 @@ def purge_generated(keep=()):
 
 
 def cmd_cleanup(profile):
-    # Wipe everything except the profile that is actually connected right now.
-    st = read_state()
-    keep = [st["profile"]] if st.get("connected") and st.get("profile") else []
+    # Wipe everything except the profiles that are actually connected right now.
+    keep = sorted(read_connections())
     removed = purge_generated(keep)
     if not removed:
         log("Nothing to clean up — no leftover bvpn-* files in %s." % CONF_DIR)
     elif keep:
-        log("Kept the files of the connected profile “%s”." % keep[0])
+        log("Kept the files of the connected %s: %s."
+            % ("profile" if len(keep) == 1 else "profiles", ", ".join(keep)))
     result(True, removed=removed)
 
 
@@ -783,6 +911,18 @@ def cmd_up(profile):
     name = conn_name(p)
     t0 = time.monotonic()
 
+    # Tunnels that are already up. They stay up: nothing below may restart the
+    # service, drop their files or touch their addresses.
+    live = read_connections()
+    others = {k: v for k, v in live.items() if k != p["name"]}
+    clash = conflicting_connection(p["name"], p["rightsubnet"], others)
+    if clash:
+        raise Fatal(
+            "“%s” is already connected and its remote network %s overlaps %s. "
+            "Two tunnels can only be up at once when their networks are disjoint — "
+            "disconnect that profile first."
+            % (clash[0], clash[1], p["rightsubnet"]))
+
     problem, _ = policy_status()
     if problem:
         raise Fatal(
@@ -799,12 +939,14 @@ def cmd_up(profile):
 
     os.makedirs(CONF_DIR, exist_ok=True)
     log("=== [VPN] Writing configuration ===")
-    # Wipe every generated file first, so only the profile being connected has any
-    # presence in /etc/ipsec.d. Deliberately here and not at app startup: /etc/ipsec.d
-    # needs root, so startup cleaning would mean a polkit prompt on every launch.
-    # Connect already holds authorization, so this is free — and it covers the case of
-    # a connect that fails later on, which used to leave files behind.
-    for path in purge_generated():
+    # Wipe every generated file first, so the only presence in /etc/ipsec.d is the
+    # profile being connected plus the ones already connected — pluto re-reads this
+    # directory, so a stale .conf of a profile nobody asked for must not survive.
+    # Deliberately here and not at app startup: /etc/ipsec.d needs root, so startup
+    # cleaning would mean a polkit prompt on every launch. Connect already holds
+    # authorization, so this is free — and it covers the case of a connect that fails
+    # later on, which used to leave files behind.
+    for path in purge_generated(keep=list(others)):
         log("  removed stale %s" % path)
     write_private(conf_path(p), build_conf(p))
     # 0600, not 0644: only pluto (root) ever reads this, and the file carries
@@ -819,7 +961,9 @@ def cmd_up(profile):
         log("  rightsubnet is %s — leaving the default route alone." % p["rightsubnet"])
     else:
         run(["ip", "route", "del", p["rightsubnet"], "dev", iface])
-    old = read_state().get("vpn_ip")
+    # Only this profile's own leftover address — another live tunnel's address is in
+    # use right now and deleting it would break it without a word.
+    old = (live.get(p["name"]) or {}).get("vpn_ip")
     if old:
         run(["ip", "addr", "del", old + "/32", "dev", iface])
 
@@ -830,7 +974,15 @@ def cmd_up(profile):
         shred(secrets_path(p))
         raise Fatal(msg)
 
-    if p["restart_service"]:
+    if p["restart_service"] and others:
+        # The restart is per-machine, not per-profile: it would tear down every tunnel
+        # pluto holds, including the ones we were asked to leave alone. Skipping it is
+        # safe — the service is demonstrably running, since something is connected
+        # through it.
+        log("=== [VPN] Not restarting the ipsec service ===")
+        log("  %s already connected — a restart would drop %s."
+            % (", ".join(sorted(others)), "it" if len(others) == 1 else "them"))
+    elif p["restart_service"]:
         log("=== [VPN] Restarting the ipsec service ===")
         if run(["systemctl", "restart", "ipsec"])[0] != 0:
             bail("Could not restart the ipsec service. Check: journalctl -u ipsec -n 50")
@@ -894,42 +1046,53 @@ def cmd_up(profile):
             run(["ip", "route", "replace", p["rightsubnet"], "dev", iface, "src", vpn_ip])
 
     # Stale rules from an earlier connection would point at the previous modecfg
-    # address, so tear them down whether or not sharing is switched on now.
-    share_teardown()
+    # address, so tear down this profile's rules whether or not sharing is switched
+    # on now. Another profile's rules stay — they belong to a live address.
+    share_teardown(p["name"])
     if p["share_vms"]:
         log("=== [VPN] Sharing with virtual machines ===")
         if is_full_tunnel(p["rightsubnet"]):
             log("  rightsubnet is %s and the default route is left alone, so there is"
                 " nothing to share — skipped." % p["rightsubnet"])
         else:
-            share_setup(p["share_subnet"], p["rightsubnet"], vpn_ip)
+            share_setup(p["name"], p["share_subnet"], p["rightsubnet"], vpn_ip)
 
     if not p["keep_secrets"]:
         shred(secrets_path(p))
         log("Secrets file removed from disk.")
     # No cleanup pass needed here — purge_generated() at the top of this function
-    # already left nothing but this profile's own files behind.
+    # already left nothing but this profile's files and the live profiles' own.
 
-    save_state({"connected": True, "profile": p["name"], "conn": name, "iface": iface,
-                "vpn_ip": vpn_ip, "subnet": p["rightsubnet"], "since": int(time.time())})
+    live = read_connections()
+    live[p["name"]] = {"conn": name, "iface": iface, "vpn_ip": vpn_ip,
+                       "subnet": p["rightsubnet"], "since": int(time.time())}
+    save_connections(live)
     log("=== [VPN] CONNECTED ===")
-    result(True, vpn_ip=vpn_ip, iface=iface, conn=name)
+    if others:
+        log("Also connected: %s" % ", ".join(sorted(others)))
+    result(True, vpn_ip=vpn_ip, iface=iface, conn=name, active=sorted(live))
 
 
 def cmd_down(profile):
     p = clean(profile)
     name = conn_name(p)
-    st = read_state()
-    iface = p["iface"] if p["iface"] != "auto" else (st.get("iface") or detect_iface() or "")
-    vpn_ip = p["vpn_ip"] if p["vpn_ip"] != "auto" else st.get("vpn_ip")
+    live = read_connections()
+    rec = live.get(p["name"]) or {}
+    others = {k: v for k, v in live.items() if k != p["name"]}
+    iface = p["iface"] if p["iface"] != "auto" else (rec.get("iface") or detect_iface() or "")
+    vpn_ip = p["vpn_ip"] if p["vpn_ip"] != "auto" else rec.get("vpn_ip")
 
     log("=== [VPN] Disconnecting ===")
     # Unconditionally — the switch may have been turned off while connected, and the
-    # rules must not outlive the address they SNAT to.
-    share_teardown()
+    # rules must not outlive the address they SNAT to. Only this profile's rules:
+    # another tunnel may be sharing through the same table.
+    share_teardown(p["name"])
     run(["ipsec", "down", name])
     run(["ipsec", "delete", name])
-    if p["restart_service"]:
+    if p["restart_service"] and others:
+        log("  Not restarting the ipsec service — %s still connected."
+            % ", ".join(sorted(others)))
+    elif p["restart_service"]:
         run(["systemctl", "restart", "ipsec"])
 
     if iface:
@@ -957,9 +1120,13 @@ def cmd_down(profile):
             log("Configuration file removed from disk.")
     except OSError as exc:
         log("  ! could not remove %s: %s" % (conf_path(p), exc))
-    save_state({"connected": False, "profile": p["name"], "since": int(time.time())})
+    live = read_connections()
+    live.pop(p["name"], None)
+    save_connections(live)
     log("=== [VPN] DISCONNECTED ===")
-    result(True)
+    if live:
+        log("Still connected: %s" % ", ".join(sorted(live)))
+    result(True, active=sorted(live))
 
 
 def cmd_status(profile):
@@ -973,7 +1140,8 @@ def cmd_status(profile):
                 connected = True
                 break
     _, traffic = run(["ipsec", "trafficstatus"], quiet=True)
-    result(True, connected=connected, status=out[-8000:], traffic=traffic[-4000:])
+    result(True, connected=connected, active=sorted(read_connections()),
+           status=out[-8000:], traffic=traffic[-4000:])
 
 
 def helper_main(argv):
@@ -1377,6 +1545,7 @@ def gui_main(auto_shutdown=False):
             menu = Gio.Menu()
             menu.append("Duplicate profile", "win.duplicate")
             menu.append("Delete profile", "win.delete")
+            menu.append("Disconnect everything", "win.disconnectall")
             menu.append("Check crypto-policies", "win.checkpolicy")
             menu.append("Clean up /etc/ipsec.d", "win.cleanup")
             menu.append("Add to application menu", "win.shortcut")
@@ -1391,6 +1560,7 @@ def gui_main(auto_shutdown=False):
 
             for name, cb in (("duplicate", self._on_duplicate),
                              ("delete", self._on_delete),
+                             ("disconnectall", self._on_disconnect_all),
                              ("checkpolicy", self._on_check_policy),
                              ("cleanup", self._on_cleanup),
                              ("shortcut", self._on_shortcut),
@@ -1825,20 +1995,27 @@ def gui_main(auto_shutdown=False):
         # -- status -------------------------------------------------------
 
         def _refresh_status(self):
-            st = read_state()
+            # The window edits one profile at a time, but several tunnels can be up —
+            # so the bar reports this profile first and then names the others, instead
+            # of saying "Disconnected" while two tunnels are running.
+            live = read_connections()
             p = self.profiles[self.current]
-            connected = bool(st.get("connected")) and st.get("profile") == p["name"]
-            if connected:
+            rec = live.get(p["name"])
+            others = sorted(n for n in live if n != p["name"])
+            if rec:
                 self.status_icon.set_from_icon_name("network-vpn-symbolic")
-                self.status_label.set_label("Connected  ·  %s on %s"
-                                            % (st.get("vpn_ip", "?"), st.get("iface", "?")))
+                text = "Connected  ·  %s on %s" % (rec.get("vpn_ip", "?"), rec.get("iface", "?"))
                 self.title.set_subtitle("connected")
             else:
                 self.status_icon.set_from_icon_name("network-vpn-disabled-symbolic")
-                self.status_label.set_label("Disconnected")
-                self.title.set_subtitle("disconnected")
-            self.btn_connect.set_sensitive(not self.busy and not connected)
-            self.btn_disconnect.set_sensitive(not self.busy and connected)
+                text = "Disconnected"
+                self.title.set_subtitle("%d other connected" % len(others) if others
+                                        else "disconnected")
+            if others:
+                text += "      also up: %s" % ", ".join(others)
+            self.status_label.set_label(text)
+            self.btn_connect.set_sensitive(not self.busy and rec is None)
+            self.btn_disconnect.set_sensitive(not self.busy and rec is not None)
 
         def _poll_state(self):
             if not self.busy:
@@ -1919,6 +2096,55 @@ def gui_main(auto_shutdown=False):
             p["keep_secrets"] = False
             p["known"] = [q["name"] for q in self.profiles]
             return p
+
+        def _payload_for(self, prof):
+            """Payload for a profile other than the one on screen — used to disconnect
+            tunnels the window is not currently showing. No secrets: "down" never
+            needs them, and nothing should decrypt sekrety.enc just to hang up."""
+            p = dict(prof)
+            p["psk"] = ""
+            p["xauth"] = ""
+            p["keep_secrets"] = False
+            p["known"] = [q["name"] for q in self.profiles]
+            return p
+
+        def _disconnect_sequence(self, names, finished=None):
+            """Disconnects the named profiles one after another.
+
+            Sequential on purpose: each "down" is its own pkexec call and its own
+            helper process, and two of them racing would fight over /etc/ipsec.d and
+            the nftables table.
+            """
+            self._collect()
+            queue = [next((p for p in self.profiles if p["name"] == n), None) for n in names]
+            queue = [p for p in queue if p]
+
+            def step(*_a):
+                if not queue:
+                    if finished:
+                        finished()
+                    return
+                prof = queue.pop(0)
+
+                def done(ok, res):
+                    if not ok:
+                        self._toast(res.get("error", "Disconnect error."))
+                    step()
+
+                self._run("down", self._payload_for(prof),
+                          "Disconnecting %s…" % prof["name"], done)
+
+            step()
+
+        def _on_disconnect_all(self, *_a):
+            names = sorted(read_connections())
+            if not names:
+                self._toast("Nothing is connected.")
+                return
+            self._disconnect_sequence(
+                names, lambda: self._toast("Disconnected %d %s."
+                                           % (len(names),
+                                              "profile" if len(names) == 1 else "profiles")))
 
         def _on_connect(self, *_a):
             def go():
@@ -2013,21 +2239,12 @@ def gui_main(auto_shutdown=False):
 
         def shutdown_after_disconnect(self):
             """Called from the tray (action 'rozlacz-i-zamknij') or from --auto-shutdown:
-            disconnect the active profile (if connected) and only then close the window."""
-            st = read_state()
-            if not st.get("connected"):
+            disconnect every active profile and only then close the window."""
+            names = sorted(read_connections())
+            if not names:
                 self.close()
                 return
-            idx = next((i for i, p in enumerate(self.profiles)
-                        if p["name"] == st.get("profile")), None)
-            if idx is not None and idx != self.current:
-                self._load_profile(idx)
-
-            def done(ok, res):
-                if not ok:
-                    self._toast(res.get("error", "Disconnect error."))
-                self.close()
-            self._run("down", self._payload(), "Disconnecting…", done)
+            self._disconnect_sequence(names, self.close)
 
         def _on_close(self, *_a):
             if self._save_source:
@@ -2237,9 +2454,12 @@ def tray_main():
     indicator.set_menu(menu)
 
     def refresh(*_a):
-        st = read_state()
-        if st.get("connected"):
-            indicator.set_icon_full(TRAY_ICON_ON, "Connected — %s" % st.get("profile", ""))
+        names = sorted(read_connections())
+        if len(names) > 1:
+            indicator.set_icon_full(TRAY_ICON_MULTI,
+                                    "Connected (%d) — %s" % (len(names), ", ".join(names)))
+        elif names:
+            indicator.set_icon_full(TRAY_ICON_ON, "Connected — %s" % names[0])
         else:
             indicator.set_icon_full(TRAY_ICON_OFF, "Disconnected")
         return True

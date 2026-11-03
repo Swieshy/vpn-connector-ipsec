@@ -39,5 +39,10 @@ and click **Connect**. The app generates a libreswan config, brings up the
 tunnel via `ipsec`, sets up routes, and shows connection status in the window
 and the tray. **Disconnect** reverses all of it.
 
+Several profiles can be connected at the same time, as long as their remote
+networks don't overlap — the app refuses the second one if they do. The tray
+icon shows two circles when more than one tunnel is up, and the menu's
+**"Disconnect everything"** hangs them all up at once.
+
 Data (profiles, encrypted passwords, logs) is kept locally in the `dane/`
 folder next to the script — nothing leaves this machine.

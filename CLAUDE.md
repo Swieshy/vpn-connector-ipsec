@@ -65,6 +65,9 @@ along the way:
    `--tray` process (KDE Plasma, AppIndicator), launched together with the
    GUI, closed independently from the icon's menu (see "Tray icon" below and
    point 7 in "Things that are easy to break").
+6. "could it be done to be connected to two VPNs at once?" → yes, as long as
+   the remote networks don't overlap; see "Several tunnels at once" below and
+   point 9 in "Things that are easy to break".
 
 **Do not suggest an installer, an RPM package, or a systemd service without
 an explicit request.** Portability is a deliberate choice.
@@ -77,7 +80,7 @@ Everything next to the script, in the `dane/` folder:
 |---|---|
 | `dane/profile.json` | profiles — **no passwords**, chmod 600 |
 | `dane/sekrety.enc` | PSK and XAUTH passwords, AES-256-CBC, key from PBKDF2 (240,000 iterations), chmod 600 |
-| `dane/stan.json` | connection state (for the indicator in the window and in the tray) |
+| `dane/stan.json` | state of every live tunnel, keyed by profile (window + tray indicator) |
 | `dane/tray.pid` | PID of the tray indicator — guards a single instance at a time |
 | `dane/ostatni-log.txt` | log of the last action |
 
@@ -116,7 +119,9 @@ closing the app window (via the X button) does **not** close the tray, and
 that's the point — the icon is meant to show connection status even when you
 don't have the window open.
 
-The icon: a green circle when connected, a gray empty circle when not. These
+The icon: a green circle when one tunnel is up, two overlapping green circles
+when more than one is (see "Several tunnels at once" below), a gray empty
+circle when none is. These
 are **our own SVGs, not names from the system icon theme** — the first
 version tried Adwaita names (`network-vpn-symbolic` /
 `network-vpn-disabled-symbolic` / `network-vpn-disconnected-symbolic`), but
@@ -131,10 +136,10 @@ has. If you change how the icons look, edit those two constants; don't try
 to go back to names from the system theme. Right-click menu:
 
 - **Show** — opens (or raises, if already running) the app window.
-- **Close** — opens the window, disconnects the active profile (if
-  connected), and only once disconnecting is finished closes both the window
-  and the tray. This is the only way to turn off the icon — closing just the
-  window doesn't touch it.
+- **Close** — opens the window, disconnects every active profile (one after
+  another, see below), and only once disconnecting is finished closes both the
+  window and the tray. This is the only way to turn off the icon — closing just
+  the window doesn't touch it.
 
 The tray never touches `pkexec`/`ipsec` directly — to disconnect it always
 asks the running (or just-started) GUI instance. A single tray instance at a
@@ -196,8 +201,9 @@ every successful connection, and on demand from the menu →
 The sequence from Rafał's original script, just tidied up:
 
 1. write `bvpn-<profile>.conf` and `.secrets`,
-2. delete routes and addresses left from the previous connection,
-3. `systemctl restart ipsec` + wait for pluto to actually come up,
+2. delete routes and addresses left from **this profile's** previous connection,
+3. `systemctl restart ipsec` + wait for pluto to actually come up — skipped
+   when another profile is already connected, since the restart would drop it,
 4. `ipsec rereadsecrets`, `ipsec add`, `ipsec up`,
 5. read the address assigned by modecfg,
 6. `ip addr add <vpn_ip>/32` + `ip route replace 10.0.0.0/8 dev <iface> src <vpn_ip>`,
@@ -213,6 +219,49 @@ The "Tunnel encryption" section: a list of ready-made sets (Rafał's
 gateway rejects the proposal, the app recognizes `no acceptable proposal`
 and states plainly that it's about the algorithms.
 
+## Several tunnels at once
+
+More than one profile can be connected at the same time. The window still edits
+one profile at a time, but the status bar names the others ("also up: lab"), the
+tray icon switches to two circles, and the menu has **"Disconnect everything"**.
+
+**The one hard rule: the remote networks must be disjoint.** `conflicting_connection()`
+checks this in the helper and refuses the second connect with the name of the profile
+in the way. The reason is routing, not IPsec: the route for `rightsubnet` carries a
+single `src` address, so an overlap means `ip route replace` silently hands the shared
+range to whichever profile connected last, and traffic leaves through the wrong tunnel
+with no error anywhere. Two `0.0.0.0/0` profiles collide for the same reason. If two
+overlapping tunnels are ever genuinely needed, the answer is separate routing tables
+plus `ip rule` — a much bigger change, not a tweak to this check.
+
+What the second connect must *not* do to the first one, and how each is handled:
+
+| Trap | Handling |
+|---|---|
+| `systemctl restart ipsec` drops every tunnel pluto holds | skipped (with a log line) whenever something else is connected |
+| `purge_generated()` wipes all `bvpn-*` | gets `keep=` with the live profiles' names |
+| `ip addr del <old vpn_ip>` | only this profile's own previous address, read from its own record |
+| `share_teardown()` dropped the whole nftables table | takes a profile name and deletes only that profile's tagged rules |
+
+`dane/stan.json` is therefore a dict of records:
+
+```json
+{"connections": {"work": {"conn": "bvpn-work", "iface": "wlo1",
+                          "vpn_ip": "10.1.2.3", "subnet": "10.0.0.0/8",
+                          "since": 1762150000}},
+ "connected": true, "updated": 1762150000}
+```
+
+`read_connections()` is the only thing that should parse it; it also still understands
+the old single-slot format (flat `connected`/`profile`/`vpn_ip` keys), so upgrading
+while a tunnel is up doesn't lose track of it. The top-level `connected` is a
+convenience mirror for "is anything up?" — never the source of truth about *which*
+profile.
+
+Disconnecting several profiles goes through `Window._disconnect_sequence()`, strictly
+one at a time: each `down` is its own pkexec call and its own helper process, and two
+racing would fight over `/etc/ipsec.d` and the nftables table.
+
 ## Sharing the tunnel with virtual machines (optional)
 
 Section "Virtual machines": a per-profile switch plus the VM subnet (default
@@ -226,9 +275,14 @@ the VM's own address, misses the selector and would leave the machine in the
 clear. So the VM traffic has to be SNATed onto the VPN address — see
 `share_setup()`.
 
-Everything goes into our own `ip vpnconnector` table: removal is atomic and
-total, it cannot collide with the tables firewalld and libvirt manage, and it
-survives `firewall-cmd --reload` (firewalld only flushes its own).
+Everything goes into our own `ip vpnconnector` table: it cannot collide with the
+tables firewalld and libvirt manage, and it survives `firewall-cmd --reload`
+(firewalld only flushes its own). The table is **shared between profiles**, since
+several can be connected at once, so every rule carries
+`comment "vpnconn:<profile>"` and `share_teardown(profile)` deletes by handle —
+only the matching rules — then drops the table once no tagged rule is left.
+Dropping the whole table in one go is still what `share_teardown(None)` does, but
+that is only correct when nothing else is sharing.
 
 Two details that are easy to get wrong:
 
@@ -242,9 +296,9 @@ Two details that are easy to get wrong:
   announces its own MSS; `syn / syn,rst` matches SYN and SYN+ACK alike. If
   `rt mtu` turns out not to reflect the tunnel path, a fixed MSS is the fallback.
 
-`share_teardown()` also runs on every connect and on every disconnect regardless
-of the switch: the rules must never outlive the address they SNAT to, and the
-modecfg address changes between connections. `net.ipv4.ip_forward` is enabled if
+`share_teardown(<profile>)` also runs on every connect and on every disconnect
+regardless of the switch: the rules must never outlive the address they SNAT to, and
+the modecfg address changes between connections. `net.ipv4.ip_forward` is enabled if
 needed but deliberately never reverted — other things on the machine may rely
 on it.
 
@@ -540,21 +594,43 @@ syntax. That one profile worked; every new one failed. When a profile "works
 only for the original connection," check for legacy secrets files supplying
 what the generated one doesn't.
 
+### 9. Nothing in the connect/disconnect path may be "global" any more
+
+Several profiles can be connected at once (see "Several tunnels at once"), so any
+operation that used to mean "there is one tunnel, clean up after it" is now a bug
+waiting to happen. Before adding a step to `cmd_up`/`cmd_down`, ask what it does to a
+*different* profile's live tunnel. The four that already had to be narrowed are in the
+table in that section — restart of the service, `purge_generated()`, `ip addr del`, and
+the nftables teardown. The same applies to anything added later: a firewall rule, a
+resolv.conf edit, a `sysctl`.
+
+Reading `dane/stan.json` directly is the other way to get this wrong. Use
+`read_connections()` / `save_connections()`; the top-level `connected` flag only
+answers "is anything up?" and says nothing about which profile.
+
 ## Testing without a VPN
 
 The code has a headless self-test — it clicks through the window and checks
 assertions:
 
 ```bash
-rm -rf dane && BVPN_SELFTEST=1 xvfb-run -a timeout 40 python3 -u vpn-connector-ipsec
+BVPN_SELFTEST=1 xvfb-run -a timeout 40 python3 -u vpn-connector-ipsec
 # expected: "SELFTEST OK — profiles: [...], secrets: [...]"
 ```
+
+**Never prefix this with `rm -rf dane`.** An earlier version of this file did, and
+it cost Rafał his real `profile.json` and `sekrety.enc` — `dane/` is live user data,
+not test scratch, and the passwords in `sekrety.enc` cannot be recovered from
+anywhere else. `data_dir()` now returns a throwaway directory under `BVPN_SELFTEST`,
+so the test starts clean on its own and never touches `dane/`. If you ever need a
+command that deletes something in this project, look at what is in it first.
 
 It checks: adding/duplicating/switching profiles, secrets coming back after
 switching profiles, two-way preset synchronization, no plaintext password in
 `sekrety.enc`, correct decryption. The tray is disabled in this mode
 (`BVPN_SELFTEST` skips `_spawn_tray()`), so the test doesn't leave an
-orphaned process behind.
+orphaned process behind, and the data directory is
+`/tmp/vpn-connector-selftest-<pid>`, so the real `dane/` is never read or written.
 
 If the GUI hangs: `PYTHONFAULTHANDLER=1` + `timeout -s ABRT 25` gives a
 traceback from where it's stuck. That's how the ComboRow trap and the EOF
@@ -567,6 +643,14 @@ sensible messages:
 echo '{"name":"t","right":"1.2.3.4","rightsubnet":"10.0.0.0/8","username":"u"}' \
   | sudo python3 vpn-connector-ipsec --helper up
 ```
+
+The multi-connection logic is deliberately in plain functions
+(`read_connections`, `save_connections`, `conflicting_connection`, `_nft_handles`),
+so it can be checked without GTK and without root — load the file with
+`importlib.machinery.SourceFileLoader` (it has no `.py` extension) and call them.
+Worth doing, because the GUI self-test needs a working GTK4 and will not run
+everywhere: in a container without a usable GTK4 stack the import itself
+segfaults, before a single line of our code runs.
 
 Note: `pyflakes` passes cleanly — keep it that way.
 
@@ -583,6 +667,11 @@ Note: `pyflakes` passes cleanly — keep it that way.
   is owned by root. The user can delete it (the directory is theirs), but if
   the data were moved to FAT/a USB stick, `chmod` would silently fail — this
   is handled with `try/except`.
+- Two tunnels whose remote networks *do* overlap — would need separate routing
+  tables plus `ip rule`, instead of the single `ip route replace` used today.
+  Currently refused outright (see "Several tunnels at once").
+- Connecting several profiles with one click. Today each is its own Connect, and
+  each is its own polkit prompt unless the authorization is still cached.
 
 ## Working style with this user
 
