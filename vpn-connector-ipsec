@@ -1266,7 +1266,7 @@ def gui_main(auto_shutdown=False):
     import gi
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
-    from gi.repository import Adw, GLib, Gio, Gtk, Pango
+    from gi.repository import Adw, Gdk, GLib, Gio, Gtk, Pango
 
     def load_store():
         try:
@@ -1404,6 +1404,28 @@ def gui_main(auto_shutdown=False):
 
     # -- window --------------------------------------------------------
 
+    # The "connected" dot in the profile list. Drawn as a CSS-styled box, not an
+    # icon from the theme: Breeze doesn't carry every symbolic name Adwaita has, and
+    # the tray already had to stop looking icons up by name for exactly that reason
+    # (see CLAUDE.md, "Tray icon"). Same green as the tray's connected icon.
+    _DOT_CSS = b"""
+    .vpn-dot { background-color: #26a269; border-radius: 9999px;
+               min-width: 10px; min-height: 10px; }
+    """
+
+    def _install_dot_css():
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        provider = Gtk.CssProvider()
+        try:
+            provider.load_from_data(_DOT_CSS)
+        except TypeError:
+            # Older introspection wants the length explicitly.
+            provider.load_from_data(_DOT_CSS, -1)
+        Gtk.StyleContext.add_provider_for_display(
+            display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
     class Window(Adw.ApplicationWindow):
 
         def __init__(self, app):
@@ -1431,6 +1453,7 @@ def gui_main(auto_shutdown=False):
             toolbar.add_top_bar(self._build_header())
             toolbar.set_content(self._build_body())
 
+            _install_dot_css()
             self._build_profile_list()
             self._unlock_if_easy()
             self._load_profile(0)
@@ -1745,9 +1768,19 @@ def gui_main(auto_shutdown=False):
                 nxt = child.get_next_sibling()
                 self.listbox.remove(child)
                 child = nxt
+            self.row_dots = []
             for p in self.profiles:
-                self.listbox.append(Adw.ActionRow(title=p["name"],
-                                                  subtitle=p.get("right") or "no gateway"))
+                row = Adw.ActionRow(title=p["name"],
+                                    subtitle=p.get("right") or "no gateway")
+                # Hidden until _refresh_status() finds this profile among the live
+                # tunnels; several can be up at once, so several dots can show.
+                dot = Gtk.Box(width_request=10, height_request=10,
+                              valign=Gtk.Align.CENTER, visible=False,
+                              tooltip_text="Connected")
+                dot.add_css_class("vpn-dot")
+                row.add_suffix(dot)
+                self.row_dots.append(dot)
+                self.listbox.append(row)
             self._loading = False
             row = self.listbox.get_row_at_index(self.current)
             if row:
@@ -2014,8 +2047,24 @@ def gui_main(auto_shutdown=False):
             if others:
                 text += "      also up: %s" % ", ".join(others)
             self.status_label.set_label(text)
+            self._refresh_dots(live)
             self.btn_connect.set_sensitive(not self.busy and rec is None)
             self.btn_disconnect.set_sensitive(not self.busy and rec is not None)
+
+        def _refresh_dots(self, live):
+            """Green dot beside every profile whose tunnel is up.
+
+            Driven by the same read_connections() call as the status bar, so the
+            list and the bar can never disagree, and by the same 3 s poll — the
+            state file is written by the root helper, not by this process.
+            """
+            for idx, dot in enumerate(getattr(self, "row_dots", [])):
+                if idx >= len(self.profiles):
+                    break
+                rec = live.get(self.profiles[idx]["name"])
+                dot.set_visible(rec is not None)
+                if rec:
+                    dot.set_tooltip_text("Connected · %s" % rec.get("vpn_ip", "?"))
 
         def _poll_state(self):
             if not self.busy:

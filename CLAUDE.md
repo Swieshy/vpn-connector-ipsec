@@ -222,8 +222,16 @@ and states plainly that it's about the algorithms.
 ## Several tunnels at once
 
 More than one profile can be connected at the same time. The window still edits
-one profile at a time, but the status bar names the others ("also up: lab"), the
-tray icon switches to two circles, and the menu has **"Disconnect everything"**.
+one profile at a time, but every connected profile gets a green dot in the list on
+the left, the status bar names the others ("also up: lab"), the tray icon switches
+to two circles, and the menu has **"Disconnect everything"**.
+
+The dot is a CSS-styled `Gtk.Box` (`.vpn-dot`), not an icon name — Breeze doesn't
+carry every symbolic name Adwaita has, which is the same trap the tray hit. Its
+size is set on the widget and only the colour comes from the stylesheet, so a
+stylesheet that fails to load leaves a visible dot rather than nothing at all.
+`_refresh_dots()` is fed by the same `read_connections()` call as the status bar,
+so the list and the bar cannot disagree.
 
 **The one hard rule: the remote networks must be disjoint.** `conflicting_connection()`
 checks this in the helper and refuses the second connect with the name of the profile
